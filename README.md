@@ -1,85 +1,139 @@
 # social_listener
 
-Technical research and specification for a system that watches Reddit for
-mentions of a set of terms, classifies them, stores them, and alerts a human.
+A Reddit social listening tool: captures mentions of a set of watch terms,
+classifies them, stores them, and alerts a human.
 
-**Status: research only.** No implementation yet. The specification is a design
-position to argue with, not a description of shipped code.
+**It runs with no Reddit credentials.** Obtaining them is a manual approval
+process that takes days, so the app ships with a synthetic corpus and switches
+to live capture the moment credentials appear — same code path, same pipeline.
 
-📄 **[docs/SPECIFICATION.md](docs/SPECIFICATION.md)** — the full technical
-specification.
+📄 **[docs/SPECIFICATION.md](docs/SPECIFICATION.md)** — the research and design
+rationale behind every decision here. Section references in the code (§3.3, §7.4)
+point into it.
 
 ---
 
-## Why this document exists
+## Run the demo
 
-Reddit is the platform where people say what they actually think about an
-organisation, and it is also the platform with the least tractable API for
-finding out. Between the 2023 pricing change, the Pushshift shutdown, and the
-2026 Responsible Builder Policy, most of the off-the-shelf tooling in this
-category either died or repriced into enterprise territory. So the build-vs-buy
-question is live again, and it deserves an honest technical answer before
-anyone writes code.
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 
-## The five findings that drive the design
+python -m social_listener seed --reset     # schema + watch terms + corpus
+python -m social_listener serve            # http://127.0.0.1:8000
+```
 
-1. **There is no firehose.** Reddit exposes no streaming or webhook API for
-   public content. Every "real-time" Reddit tool is polling listing endpoints
-   on a timer. Latency is a budget decision, not a platform feature.
+That's the whole setup. No database server, no API key, no build step.
 
-2. **The rate limit *is* the architecture.** 100 queries per minute per OAuth
-   client — roughly 144,000 calls/day — averaged over a 10-minute window, and
-   scoped **per API key, not per end user**. A multi-tenant product gets no
-   extra headroom by adding customers. The entire ingestion design is an
-   exercise in spending those calls well.
+```bash
+python -m social_listener stats      # what is in the database
+python -m social_listener poll       # one capture cycle
+python -m social_listener sweep      # one delete-compliance sweep
+pytest -q                            # 75 tests
+```
 
-3. **Listings terminate at ~1,000 items.** Ten pages of 100. The Data API
-   structurally cannot answer "everything ever said about X", so historical
-   coverage is a separate problem needing an external archive with weaker
-   guarantees.
+### ⚠️ The demo data is fabricated
 
-4. **Access is gated.** Since the Responsible Builder Policy update of 5 June
-   2026, new OAuth clients go through manual approval rather than self-service
-   registration.
+"Northbridge College" is a **fictional institution** and every post is generated
+from a template. None of it is real Reddit content and none of it describes a
+real organisation. The UI carries a permanent banner saying so. **Keep that
+banner** — a screenshot of this feed must never be mistakable for real public
+sentiment about a real place.
 
-5. **The commercial cliff is the real risk.** The free tier is non-commercial.
-   Commercial terms are reported at ~$0.24 per 1,000 calls with a bundled tier
-   near $12,000/month. There is nothing in between — which is why GummySearch,
-   the best-known tool in this category, stopped new signups in November 2025.
+## Going live
 
-**Whether the intended use is commercial is a four-orders-of-magnitude
-question, and it should be settled before any code is written.**
+```bash
+cp .env.example .env     # fill in REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET
+```
 
-## What the specification covers
+The banner turns green, `get_source()` returns `LiveRedditSource` instead of
+`DemoSource`, and nothing else changes. Getting those credentials is phase 0 of
+the plan in §15 — it is the riskiest unknown in the project and the cheapest to
+test, which is exactly why the rest of the system was built not to depend on it.
 
-| § | Section | |
-|---|---|---|
-| 1–2 | Executive summary, data acquisition options | Why the Data API, why not scraping, what the archives can and cannot do |
-| 3–4 | Auth, rate limits, endpoint inventory | OAuth mechanics, the `X-Ratelimit-*` headers, and why `/api/info` is the efficiency lever |
-| 5 | Ingestion architecture | Four loops — discovery, poll, revisit, compliance — each with its own budget and shed priority |
-| 6 | Data model | DDL, with `fullname` as the structural dedupe key and versioned enrichment |
-| 7 | Reddit-specific correctness traps | Edits inverting sentiment, deliberate score fuzzing, deletion propagation |
-| 8–9 | Matching and enrichment | Tiered matching; a hybrid sentiment approach with honest accuracy numbers |
-| 10–11 | Alerting and metrics | Severity routing, spike detection, and metric definitions worth fixing early |
-| 12 | Cost and capacity | A worked API-call budget showing a 20-subreddit footprint at ~29% of the free tier |
-| 13 | Compliance and privacy | Delete propagation as a contractual obligation, plus the data-protection position |
-| 14–16 | Stack, phasing, open questions | What to build first, and what nobody has answered yet |
+## What to show in a demo
 
-## Two things worth flagging up front
+Five things that are worth pausing on, because each is a decision the
+specification argues for and the code actually implements:
 
-**The pricing figures are widely reported but not officially published.** Reddit
-does not publish a self-serve commercial rate card. Get a quote before
-budgeting against any number in this document.
+1. **The bot filter runs before the classifier.** `Bots filtered: 6` on the
+   dashboard. AutoModerator boilerplate mentions the brand, so it passes the
+   matching tier — and gets caught by the spam lane before any model spends a
+   cent on it.
+2. **Sarcasm is caught by admitting ignorance, not by being clever.** Filter the
+   feed and find a row tagged *low confidence — needs a human*. The lexicon
+   scores "Oh great, the portal is down again. Thanks a lot /s" as **positive**.
+   It is wrong. What matters is that it says so with 35% confidence and routes
+   the item to a human instead of asserting it.
+3. **Every row shows why it was flagged.** The matched span is quoted under each
+   item, labelled with the term that hit. A reviewer who cannot see why an item
+   was flagged stops trusting the feed, and a feed nobody trusts is a feed
+   nobody reads.
+4. **Spike detection is relative, not absolute.** The planted billing incident
+   fires at 14 mentions against a rolling baseline of 3.0 (mean + 3σ). A fixed
+   threshold would break the first time overall volume changed.
+5. **Press "Run compliance sweep".** Items deleted upstream are purged locally —
+   content, title and author nulled, the row kept so the counts stay valid, and
+   the cached alert bodies scrubbed in the same pass. This is a contractual
+   obligation under Reddit's terms, not a nicety, and it is the thing most
+   likely to be breached by accident via exports and caches.
 
-**Sentiment accuracy is worse than vendor material suggests.** One
-Reddit-focused study put VADER at 69% overall accuracy against RoBERTa's 66% —
-and the aggregate hides that the lexicon method is markedly worse on the
-negative class, which is exactly the class a reputation-monitoring tool exists
-to catch. Reddit's sarcasm density is a genuine, unsolved problem. §9 takes a
-position on it rather than papering over it.
+## How it fits together
 
-## Suggested first step
+```
+DemoSource / LiveRedditSource     one interface, chosen by whether creds exist
+        │
+        ▼
+   normalise          Reddit's shape -> one schema
+        │
+   dedupe             fullname is the key; the database enforces it
+        │
+   match              literal -> phrase -> boolean -> negative patterns
+        │             (~99% of the stream is rejected here, before any model)
+        ▼
+   enrich             VADER + rules; escalation flagged, not yet routed
+        │
+   store + alert      severity 4-5 pages a human, one alert per thread
+```
 
-Phase 0 in §15: get an OAuth client approved and stand up a rate limiter that
-steers by the live `X-Ratelimit-*` headers. Access approval is the single
-riskiest unknown in the whole plan and the cheapest to test.
+| Module | Does |
+|---|---|
+| `config.py` | Settings; decides demo vs live |
+| `ratelimit.py` | Token bucket steered by Reddit's `X-Ratelimit-*` headers |
+| `reddit/client.py` | OAuth `client_credentials`, batching, 401/429 retry |
+| `reddit/source.py` | The demo/live seam |
+| `matching.py` | Tiered matcher with a hand-written boolean parser |
+| `enrichment.py` | Sentiment, intent, severity, topics, bot filter |
+| `ingest.py` | The pipeline; upsert, match, enrich, alert |
+| `compliance.py` | The delete-compliance sweep |
+| `analytics.py` | Metric definitions — fixed early, on purpose |
+| `web/` | Dashboard and review feed |
+
+## What is deliberately not built yet
+
+Being straight about this matters more than a longer feature list:
+
+- **The transformer and LLM classification lanes.** `enrichment.py` defines the
+  `Enricher` interface and already computes which items *would* escalate, so the
+  cost projection is real. But only the lexicon lane runs. Adding the others is
+  a registration, not a rewrite.
+- **The discovery loop.** `Source.search()` exists and is tested; nothing calls
+  it on a schedule yet. Tracked communities are configured by hand.
+- **Archive backfill.** Live capture only. History needs Arctic Shift or
+  PullPush — §2 and §5.5.
+- **A Redis-backed limiter.** The current one is in-process and thread-safe,
+  which is correct for one worker and wrong for several. The interface is the
+  one a Redis version would expose, so the swap touches one file.
+- **Alert delivery.** Alerts are raised and displayed, not emailed or texted.
+- **Adaptive poll intervals.** The schema carries `observed_items_hour` and the
+  arithmetic is in §5.2, but intervals are currently static.
+
+### One number that will not match the specification
+
+§12 budgets the expensive classification lane at 5–15% of matched volume. The
+demo reports **~45%**, because the synthetic corpus is deliberately
+complaint-heavy — it exists to exercise the severity and escalation paths, not
+to model a realistic sentiment mix. On a real corpus, where most mentions are
+neutral chatter, expect the figure to fall back toward the specification's
+range. Worth saying out loud before someone in the room does the arithmetic on
+the LLM bill.

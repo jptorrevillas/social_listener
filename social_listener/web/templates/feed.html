@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Review feed — Social Listener{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>Review feed</h2>
+  <p class="sub">
+    Ranked by severity, then recency. Every row shows the span that matched and the
+    classifier’s confidence — a reviewer who cannot see why an item was flagged stops
+    trusting the feed.
+  </p>
+
+  <div class="filters">
+    <a href="/feed" class="{{ 'on' if not active_sentiment and not active_severity and not active_subreddit }}">All</a>
+    <a href="/feed?sentiment=negative" class="{{ 'on' if active_sentiment == 'negative' }}">Negative</a>
+    <a href="/feed?sentiment=positive" class="{{ 'on' if active_sentiment == 'positive' }}">Positive</a>
+    <a href="/feed?min_severity=4" class="{{ 'on' if active_severity == 4 }}">Severity 4+</a>
+    {% for sub in subreddits %}
+      <a href="/feed?subreddit={{ sub }}" class="{{ 'on' if active_subreddit == sub }}">r/{{ sub }}</a>
+    {% endfor %}
+  </div>
+
+  {% if entries %}
+    {% for entry in entries %}
+      <div class="item">
+        <div class="item-head">
+          <span class="pill sev-{{ entry.severity }}">Sev {{ entry.severity }}</span>
+          <span class="pill sentiment-{{ entry.sentiment }}">
+            {{ entry.sentiment }} {{ '%+.2f'|format(entry.sentiment_score) }}
+          </span>
+          <span class="pill">{{ entry.intent|replace('_', ' ') }}</span>
+          {% if entry.needs_review %}
+            <span class="pill review">low confidence — needs a human</span>
+          {% endif %}
+          {% for topic in entry.topics %}<span class="pill">{{ topic }}</span>{% endfor %}
+        </div>
+
+        {% if entry.is_tombstoned %}
+          <p class="item-body purged">{{ entry.body }}</p>
+        {% else %}
+          {% if entry.title %}<p class="item-title">{{ entry.title }}</p>{% endif %}
+          {% if entry.body %}<p class="item-body">{{ entry.body }}</p>{% endif %}
+          {% for span in entry.spans %}
+            <p class="matched-span"><strong>{{ span.term }}</strong> matched: {{ span.text }}</p>
+          {% endfor %}
+        {% endif %}
+
+        <div class="item-meta">
+          <span>r/{{ entry.subreddit }}</span>
+          <span>{{ entry.kind }}</span>
+          <span>{{ 'u/' ~ entry.author if entry.author else 'author purged' }}</span>
+          <span>{{ entry.created.strftime('%Y-%m-%d %H:%M') }}</span>
+          <span>{{ entry.score }} points · {{ entry.num_comments }} comments</span>
+          <span>confidence {{ '%.0f'|format(entry.confidence * 100) }}%</span>
+          <span>{{ entry.terms|join(', ') }}</span>
+          {% if not entry.is_tombstoned %}<a href="{{ entry.permalink }}" rel="noopener">source</a>{% endif %}
+        </div>
+        <p class="rationale">{{ entry.rationale }} — {{ entry.model }}</p>
+      </div>
+    {% endfor %}
+  {% else %}
+    <p class="empty">Nothing matches this filter.</p>
+  {% endif %}
+</div>
+
+{% endblock %}

@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block content %}
+
+{% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+
+<div class="tiles">
+  <div class="tile">
+    <div class="label">Mentions captured</div>
+    <div class="value">{{ totals.items }}</div>
+    <div class="note">{{ totals.matched_items }} matched a watch term</div>
+  </div>
+  <div class="tile">
+    <div class="label">Net sentiment</div>
+    <div class="value {{ 'negative' if totals.net_sentiment < 0 else 'positive' }}">
+      {{ '%+.0f'|format(totals.net_sentiment * 100) }}%
+    </div>
+    <div class="note">vader-rules 0.1.0</div>
+  </div>
+  <div class="tile">
+    <div class="label">Open alerts</div>
+    <div class="value">{{ totals.alerts_open }}</div>
+    <div class="note">severity 4–5, one per thread</div>
+  </div>
+  <div class="tile">
+    <div class="label">Bots filtered</div>
+    <div class="value">{{ totals.spam_filtered }}</div>
+    <div class="note">before any model ran</div>
+  </div>
+  <div class="tile">
+    <div class="label">Purged</div>
+    <div class="value">{{ totals.tombstoned }}</div>
+    <div class="note">deleted upstream, scrubbed here</div>
+  </div>
+  <div class="tile">
+    <div class="label">Estimated reach</div>
+    <div class="value">{{ '{:,}'.format(reach) }}</div>
+    <div class="note">a model, not a measurement</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Mention volume by day</h2>
+  <p class="sub">Stacked by sentiment. Purged items keep their count — the content goes, the aggregate stays.</p>
+  <div class="legend">
+    <span class="key"><span class="swatch" style="background:var(--negative)"></span> Negative</span>
+    <span class="key"><span class="swatch" style="background:var(--neutral)"></span> Neutral</span>
+    <span class="key"><span class="swatch" style="background:var(--positive)"></span> Positive</span>
+  </div>
+  <div class="chart-scroll">{{ volume_chart|safe }}</div>
+
+  {% if spikes %}
+    {% for spike in spikes %}
+      <div class="flash" style="margin-top:14px">
+        <strong>Spike detected {{ spike.date }}</strong> — {{ spike.total }} mentions against a
+        trailing baseline of {{ spike.baseline_mean }} (threshold {{ spike.threshold }}, mean + 3σ).
+      </div>
+    {% endfor %}
+  {% endif %}
+
+  <details class="table-view">
+    <summary>Table view</summary>
+    <table>
+      <thead><tr><th>Date</th><th class="num">Negative</th><th class="num">Neutral</th><th class="num">Positive</th><th class="num">Total</th></tr></thead>
+      <tbody>
+        {% for point in series %}
+          {% if point.total %}
+          <tr>
+            <td>{{ point.date }}</td>
+            <td class="num">{{ point.negative }}</td>
+            <td class="num">{{ point.neutral }}</td>
+            <td class="num">{{ point.positive }}</td>
+            <td class="num">{{ point.total }}</td>
+          </tr>
+          {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+</div>
+
+<div class="two-col">
+  <div class="card">
+    <h2>What people are talking about</h2>
+    <p class="sub">Aspect counts. Far more actionable than a document-level score.</p>
+    {{ topic_bars|safe }}
+  </div>
+  <div class="card">
+    <h2>Share of voice</h2>
+    <p class="sub">Each term’s mentions as a share of all matched mentions.</p>
+    {{ sov_bars|safe }}
+  </div>
+</div>
+
+<div class="two-col">
+  <div class="card">
+    <h2>Where the conversation is</h2>
+    <p class="sub">Communities on the poll loop, by captured volume.</p>
+    {{ sub_bars|safe }}
+  </div>
+
+  <div class="card">
+    <h2>Open alerts</h2>
+    <p class="sub">Severity 4–5 only. Everything below that is queryable but silent.</p>
+    {% if alerts %}
+      {% for alert in alerts %}
+        <div class="item">
+          <div class="item-head">
+            <span class="pill sev-{{ alert.severity }}">Severity {{ alert.severity }}</span>
+            <strong>{{ alert.headline }}</strong>
+          </div>
+          <p class="item-body">{{ alert.text }}</p>
+          <div class="item-meta">
+            <span class="rationale">{{ alert.detail }}</span>
+          </div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <p class="empty">No open alerts.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Run the pipeline</h2>
+  <p class="sub">
+    A poll cycle re-fetches every tracked community; the sweep re-checks retained items
+    against Reddit and purges anything deleted upstream. Both are safe to run repeatedly —
+    the dedupe key is structural.
+  </p>
+  <div class="actions">
+    <form method="post" action="/actions/poll"><button class="btn" type="submit">Run poll cycle</button></form>
+    <form method="post" action="/actions/sweep"><button class="btn" type="submit">Run compliance sweep</button></form>
+  </div>
+</div>
+
+{% endblock %}
