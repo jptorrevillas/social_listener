@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.sqlite3
+*.db
+.DS_Store
+.idea/
+.vscode/
+data/
+*.parquet
+*.jsonl
