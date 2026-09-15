@@ -15,6 +15,8 @@ point into it.
 
 ## Run the demo
 
+**macOS / Linux**
+
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -22,6 +24,21 @@ pip install -r requirements.txt
 python -m social_listener seed --reset     # schema + watch terms + corpus
 python -m social_listener serve            # http://127.0.0.1:8000
 ```
+
+**Windows (PowerShell)**
+
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+python -m social_listener seed --reset
+python -m social_listener serve
+```
+
+If PowerShell refuses to run the activate script, either use
+`.venv\Scripts\activate.bat` or allow scripts for the current session:
+`Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned`.
 
 That's the whole setup. No database server, no API key, no build step.
 
@@ -31,6 +48,11 @@ python -m social_listener poll       # one capture cycle
 python -m social_listener sweep      # one delete-compliance sweep
 pytest -q                            # 75 tests
 ```
+
+Requirements are specified as **floors** (`>=`), not exact pins, so they resolve
+against whatever your package index currently carries. Each floor sits at the
+release that introduced an API this code actually uses, so a genuinely
+too-old version fails loudly instead of subtly.
 
 ### ⚠️ The demo data is fabricated
 

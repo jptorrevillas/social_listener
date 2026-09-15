@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,14 +29,15 @@ from . import charts
 
 BASE_DIR = Path(__file__).resolve().parent
 
-app = FastAPI(title="Social Listener")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="Social Listener", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-
-
-@app.on_event("startup")
-def _startup() -> None:
-    init_db()
 
 
 def _dedupe_spans(matches) -> list[dict]:

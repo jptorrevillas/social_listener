@@ -1,12 +1,21 @@
+# Floors, not exact pins.
+#
+# These were originally pinned to the exact versions resolved on the machine
+# that built the project, which is the wrong call for something other people
+# have to install: a pin only resolves if that precise build exists on the
+# installer's index, and one of them did not. Floors are set at the release
+# that introduced an API this code actually depends on, so anything current
+# works and genuinely-too-old fails loudly.
+
 # Runtime
-fastapi==0.141.1
-uvicorn[standard]==0.52.4
-jinja2==3.1.6
-sqlalchemy==2.0.52
-httpx==0.28.1
-python-dotenv==1.2.3
-python-multipart==0.0.20
-vaderSentiment==3.3.2
+fastapi>=0.110            # Starlette >=0.36: TemplateResponse(request, name, ...)
+uvicorn[standard]>=0.27
+jinja2>=3.1
+sqlalchemy>=2.0           # DeclarativeBase, Mapped, mapped_column
+httpx>=0.27
+python-dotenv>=1.0
+python-multipart>=0.0.7   # form parsing for the dashboard's POST actions
+vaderSentiment>=3.3.2
 
 # Tests
-pytest==9.1.1
+pytest>=8.0
