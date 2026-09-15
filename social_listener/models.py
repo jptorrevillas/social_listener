@@ -4,12 +4,20 @@ The specification's DDL targets MySQL 8. These models are written to the
 portable subset so the demo runs on SQLite unchanged; the only deliberate
 divergence is that ENUM columns are plain strings with a CHECK-free Python-side
 vocabulary, which SQLite handles and MySQL will accept.
+
+Annotations here use Optional[X] rather than `X | None` on purpose. SQLAlchemy
+evaluates every Mapped[...] annotation at runtime to build the column, and
+`from __future__ import annotations` does not save you from that -- it only
+defers the evaluation. PEP 604 unions raise TypeError when that evaluation
+happens on Python 3.9, so this file stays on the older spelling and the project
+runs on 3.9 as well as 3.13. tests/test_python_compat.py enforces it.
 """
 
 from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import (
     Boolean,
@@ -45,7 +53,7 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def hash_author(author: str | None) -> str | None:
+def hash_author(author: Optional[str]) -> Optional[str]:
     """Stable pseudonymous handle for analytics that outlive the raw username.
 
     §6 keeps this alongside `author` so the handle can be dropped on a deletion
@@ -70,7 +78,7 @@ class Term(Base):
     match_type: Mapped[str] = mapped_column(String(16), default="phrase", nullable=False)
     pattern: Mapped[str] = mapped_column(Text, nullable=False)
     # Exclusions. §8 -- users need NOT more than they expect.
-    negative_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)
+    negative_pattern: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
@@ -89,10 +97,10 @@ class Subreddit(Base):
     name: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
     poll_interval_secs: Mapped[int] = mapped_column(Integer, default=300, nullable=False)
     # Measured from live data; drives the interval (§5.2).
-    observed_items_hour: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
+    observed_items_hour: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
     source: Mapped[str] = mapped_column(String(16), default="manual", nullable=False)
-    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    last_fullname_seen: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_polled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_fullname_seen: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -109,25 +117,25 @@ class Item(Base):
     fullname: Mapped[str] = mapped_column(String(20), unique=True, nullable=False)
     kind: Mapped[str] = mapped_column(String(8), nullable=False)
     subreddit: Mapped[str] = mapped_column(String(80), nullable=False)
-    author: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    author_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    title: Mapped[str | None] = mapped_column(String(400), nullable=True)
-    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    author: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    author_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    title: Mapped[Optional[str]] = mapped_column(String(400), nullable=True)
+    body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     permalink: Mapped[str] = mapped_column(String(400), nullable=False)
-    parent_fullname: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    link_fullname: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    parent_fullname: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    link_fullname: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
     created_utc: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
-    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
-    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    num_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    edited_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    num_comments: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    edited_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     is_removed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    purged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    purged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     provenance: Mapped[str] = mapped_column(String(16), default="live", nullable=False)
 
@@ -159,7 +167,7 @@ class Item(Base):
         return " ".join(filter(None, (self.title, self.body)))
 
     @property
-    def latest_enrichment(self) -> "Enrichment | None":
+    def latest_enrichment(self) -> Optional["Enrichment"]:
         if not self.enrichments:
             return None
         return max(self.enrichments, key=lambda e: e.created_at)
@@ -178,8 +186,8 @@ class Match(Base):
     term_id: Mapped[int] = mapped_column(ForeignKey("listening_term.id", ondelete="CASCADE"))
     # The span that hit. §8 -- without it reviewers cannot see why an item was
     # flagged, and stop trusting the feed.
-    matched_text: Mapped[str | None] = mapped_column(String(400), nullable=True)
-    confidence: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
+    matched_text: Mapped[Optional[str]] = mapped_column(String(400), nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Numeric(4, 3), nullable=True)
 
     item: Mapped[Item] = relationship(back_populates="matches")
     term: Mapped[Term] = relationship(back_populates="matches")
@@ -197,14 +205,14 @@ class Enrichment(Base):
     model_name: Mapped[str] = mapped_column(String(120), nullable=False)
     model_version: Mapped[str] = mapped_column(String(40), nullable=False)
 
-    sentiment: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    sentiment_score: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
-    confidence: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
-    severity: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    intent: Mapped[str | None] = mapped_column(String(60), nullable=True)
-    topics: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON-encoded
+    sentiment: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    sentiment_score: Mapped[Optional[float]] = mapped_column(Numeric(4, 3), nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Numeric(4, 3), nullable=True)
+    severity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    intent: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    topics: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON-encoded
     is_spam: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     item: Mapped[Item] = relationship(back_populates="enrichments")
@@ -222,8 +230,8 @@ class MetricSnapshot(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     item_id: Mapped[int] = mapped_column(ForeignKey("listening_item.id", ondelete="CASCADE"))
     observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    num_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    num_comments: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     item: Mapped[Item] = relationship(back_populates="snapshots")
 
@@ -236,14 +244,14 @@ class Alert(Base):
     __tablename__ = "listening_alert"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    item_id: Mapped[int | None] = mapped_column(
+    item_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("listening_item.id", ondelete="CASCADE"), nullable=True
     )
     kind: Mapped[str] = mapped_column(String(24), nullable=False)  # severity | spike
     headline: Mapped[str] = mapped_column(String(400), nullable=False)
-    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     severity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
-    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    acknowledged_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
-    item: Mapped[Item | None] = relationship()
+    item: Mapped[Optional[Item]] = relationship()

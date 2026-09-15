@@ -15,6 +15,10 @@ point into it.
 
 ## Run the demo
 
+**Requires Python 3.9 or newer.** Check with `python --version`. It is tested on
+3.11; 3.9 is supported but reached end of life in October 2025, so 3.11+ is the
+better choice if you get to pick.
+
 **macOS / Linux**
 
 ```bash
@@ -28,7 +32,7 @@ python -m social_listener serve            # http://127.0.0.1:8000
 **Windows (PowerShell)**
 
 ```powershell
-py -m venv .venv
+py -3.11 -m venv .venv     # or: py -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 

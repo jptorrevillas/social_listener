@@ -7,6 +7,9 @@
 # that introduced an API this code actually depends on, so anything current
 # works and genuinely-too-old fails loudly.
 
+# Requires Python 3.9+. See tests/test_python_compat.py for what that
+# constrains in the source.
+
 # Runtime
 fastapi>=0.110            # Starlette >=0.36: TemplateResponse(request, name, ...)
 uvicorn[standard]>=0.27

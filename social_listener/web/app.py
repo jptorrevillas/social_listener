@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -68,7 +69,7 @@ def _base_context(request: Request) -> dict:
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard(request: Request, flash: str | None = None):
+def dashboard(request: Request, flash: Optional[str] = None):
     with session_scope() as session:
         totals = analytics.totals(session)
         series = analytics.volume_by_day(session)
@@ -124,9 +125,9 @@ def dashboard(request: Request, flash: str | None = None):
 @app.get("/feed", response_class=HTMLResponse)
 def feed(
     request: Request,
-    sentiment: str | None = None,
-    min_severity: int | None = None,
-    subreddit: str | None = None,
+    sentiment: Optional[str] = None,
+    min_severity: Optional[int] = None,
+    subreddit: Optional[str] = None,
 ):
     with session_scope() as session:
         rows = analytics.feed(
