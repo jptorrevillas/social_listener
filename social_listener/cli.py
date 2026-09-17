@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 from . import ledger
 from .analytics import detect_spikes, totals
-from .config import settings
+from .config import diagnose_env, settings
 from .db import init_db, reset_db, session_scope
 from .demo.corpus import CHANNELS, DEMO_TERMS
 from .harvest import harvest_channels, run_discovery
@@ -177,6 +177,40 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Explain why the app is in demo mode, without printing the key."""
+    report = diagnose_env()
+
+    print(f"  mode              {report['mode'].upper()}")
+    print(f"  .env expected at  {report['env_path']}")
+    print(f"  .env present      {'yes' if report['env_exists'] else 'NO'}")
+    print(f"  running from      {report['cwd']}")
+    print(f"  key detected      {'yes' if report['key_seen'] else 'NO'}")
+    if report.get("key_fingerprint"):
+        # Never the whole key: enough to confirm which one is loaded.
+        print(f"  key              {report['key_fingerprint']}")
+
+    for note in report["notes"]:
+        print(f"\n  note: {note}")
+
+    if report["problems"]:
+        print("\n  problems found:")
+        for problem in report["problems"]:
+            print(f"    - {problem}")
+    elif report["key_seen"]:
+        print("\n  Configuration looks correct. Try: python -m social_listener harvest")
+
+    if not report["key_seen"]:
+        print(
+            "\n  Quickest fix, from the project root:\n"
+            '    PowerShell:  Set-Content -Path .env -Value "YOUTUBE_API_KEY=YOURKEY" -Encoding utf8\n'
+            "    bash:        echo 'YOUTUBE_API_KEY=YOURKEY' > .env\n"
+            "  Or bypass .env entirely for one session:\n"
+            '    PowerShell:  $env:YOUTUBE_API_KEY="YOURKEY"'
+        )
+    return 0 if report["key_seen"] else 1
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -213,6 +247,11 @@ def main(argv=None) -> int:
 
     stats = sub.add_parser("stats", help="summarise the database")
     stats.set_defaults(func=cmd_stats)
+
+    doctor = sub.add_parser(
+        "doctor", help="diagnose why the API key is not being picked up"
+    )
+    doctor.set_defaults(func=cmd_doctor)
 
     serve = sub.add_parser("serve", help="run the web UI")
     serve.add_argument("--host", default="127.0.0.1")

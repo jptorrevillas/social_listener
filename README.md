@@ -64,6 +64,25 @@ be mistakable for real sentiment about a real place.
 
 ```bash
 cp .env.example .env     # add YOUTUBE_API_KEY
+python -m social_listener doctor
+```
+
+`doctor` is the first thing to run if the banner still says DEMO. It reports
+where it looked for `.env`, whether the key parsed, and a fingerprint of the key
+(never the key itself), and it names the specific problem. The ways this fails
+are all silent:
+
+| Symptom | Cause |
+|---|---|
+| `.env present NO` but you made one | It is named `.env.txt` — Windows hides known extensions |
+| `.env` unreadable | UTF-16, which is what PowerShell 5.1 `>` redirection writes. Use `Set-Content -Encoding utf8` |
+| Key present but empty | `YOUTUBE_API_KEY` appears twice; `.env.example` ships an empty one and the **last** wins |
+| Worked yesterday, not today | You launched from a different directory (fixed — `.env` is now anchored to the project root) |
+
+To skip `.env` entirely for one session:
+
+```powershell
+$env:YOUTUBE_API_KEY="AIza..."
 ```
 
 An API key is self-service from the Google Cloud console — **no approval
