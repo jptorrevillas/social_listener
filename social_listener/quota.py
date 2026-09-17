@@ -22,14 +22,24 @@ Two consequences the design takes seriously:
    burns the day's budget in 100 calls.
 
 Quota resets at midnight America/Los_Angeles, not UTC and not local time.
+
+That timezone is the one portability trap in this module. `zoneinfo` reads the
+IANA database from the operating system, and Windows does not ship one -- nor do
+slim Linux container images. On those the lookup raises
+ZoneInfoNotFoundError, which is why `tzdata` is a hard requirement rather than
+an optional extra. If it is somehow missing anyway, this module degrades to a
+fixed -08:00 offset with a loud warning instead of refusing to import: a quota
+boundary an hour out during daylight saving is a much smaller problem than an
+application that will not start.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import warnings
 from dataclasses import dataclass
 from typing import Optional
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Documented costs for the read methods this project uses. Anything absent is
 # rejected rather than guessed at -- an unpriced call is how a budget silently
@@ -44,7 +54,39 @@ METHOD_COSTS: dict[str, int] = {
 }
 
 DAILY_UNITS = 10_000
-QUOTA_TIMEZONE = ZoneInfo("America/Los_Angeles")
+QUOTA_TIMEZONE_KEY = "America/Los_Angeles"
+
+
+def _resolve_quota_timezone():
+    """The reset timezone, or a fixed fallback if no tz database is available.
+
+    Pacific time is UTC-8 in winter and UTC-7 under daylight saving, so the
+    fallback puts the reset boundary up to an hour out for part of the year.
+    That is a real inaccuracy and the warning says so -- but it is strictly
+    better than an ImportError, and installing tzdata removes it entirely.
+    """
+    try:
+        return ZoneInfo(QUOTA_TIMEZONE_KEY)
+    except (ZoneInfoNotFoundError, KeyError):
+        warnings.warn(
+            f"No IANA time zone database found, so {QUOTA_TIMEZONE_KEY} could "
+            "not be loaded. Falling back to a fixed UTC-08:00 offset, which "
+            "puts the quota reset boundary up to an hour out during daylight "
+            "saving. Install the 'tzdata' package to fix this: it ships in "
+            "requirements.txt and is required on Windows and on slim container "
+            "images, neither of which carries a system tz database.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return dt.timezone(dt.timedelta(hours=-8), "PST-fallback")
+
+
+QUOTA_TIMEZONE = _resolve_quota_timezone()
+
+
+def timezone_label() -> str:
+    """How to describe the reset timezone in output, fallback included."""
+    return getattr(QUOTA_TIMEZONE, "key", None) or str(QUOTA_TIMEZONE)
 
 
 class QuotaExhausted(RuntimeError):
@@ -53,7 +95,7 @@ class QuotaExhausted(RuntimeError):
     def __init__(self, method: str, cost: int, remaining: int) -> None:
         super().__init__(
             f"{method} costs {cost} units but only {remaining} remain today; "
-            f"quota resets at midnight {QUOTA_TIMEZONE.key}"
+            f"quota resets at midnight {timezone_label()}"
         )
         self.method = method
         self.cost = cost

@@ -20,5 +20,12 @@ python-dotenv>=1.0
 python-multipart>=0.0.7   # form parsing for the dashboard's POST actions
 vaderSentiment>=3.3.2
 
+# The IANA time zone database, needed to resolve America/Los_Angeles (the
+# YouTube quota reset boundary). Python's zoneinfo reads this from the OS, and
+# Windows does not ship one -- nor do slim container images. Declared
+# unconditionally rather than behind a platform marker so every environment
+# behaves identically.
+tzdata>=2024.1
+
 # Tests
 pytest>=8.0

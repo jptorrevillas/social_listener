@@ -24,7 +24,7 @@ from .db import init_db, reset_db, session_scope
 from .demo.corpus import CHANNELS, DEMO_TERMS
 from .harvest import harvest_channels, run_discovery
 from .models import Channel, WatchTerm
-from .quota import METHOD_COSTS, QuotaExhausted
+from .quota import METHOD_COSTS, QuotaExhausted, timezone_label
 from .retention import expiry_report, run_retention
 from .youtube.source import DemoSource, get_source
 
@@ -136,7 +136,7 @@ def cmd_quota(args: argparse.Namespace) -> int:
 
     with session_scope() as session:
         current = ledger.status(session)
-    print(f"  quota day        {current.day} (America/Los_Angeles)")
+    print(f"  quota day        {current.day} ({timezone_label()})")
     print(f"  spent            {current.spent} / {current.limit} units "
           f"({current.fraction_used:.0%})")
     print(f"  remaining        {current.remaining}")
