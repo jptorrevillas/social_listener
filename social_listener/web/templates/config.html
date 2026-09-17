@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Configuration — Social Listener{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>Watch terms</h2>
+  <p class="sub">
+    Comments on a channel you own are captured regardless of these terms — someone
+    complaining under your own enrolment video rarely names the institution. Terms
+    are what find conversations <em>elsewhere</em>, and only those flagged for
+    discovery are worth spending a {{ method_costs[0][1] }}-unit search on.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Label</th><th>Type</th><th>Pattern</th><th>Excludes</th><th>Discovery</th><th class="num">Hits</th></tr>
+    </thead>
+    <tbody>
+      {% for term in terms %}
+        <tr>
+          <td>{{ term.label }}</td>
+          <td>{{ term.match_type }}</td>
+          <td><code>{{ term.pattern }}</code></td>
+          <td>{{ term.negative_pattern or '—' }}</td>
+          <td>{{ 'yes' if term.use_in_discovery else 'no' }}</td>
+          <td class="num">{{ term.hits }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Tracked channels</h2>
+  <p class="sub">
+    Enumerating a channel’s uploads costs 1 unit via its uploads playlist, where
+    finding the same videos by search would cost {{ method_costs[0][1] }}. Tracking a
+    channel is therefore ~100× cheaper than searching for it.
+  </p>
+  <table>
+    <thead><tr><th>Channel</th><th>ID</th><th>Owned</th><th class="num">Videos</th><th>Last polled</th></tr></thead>
+    <tbody>
+      {% for channel in channels %}
+        <tr>
+          <td>{{ channel.title }}</td>
+          <td><code>{{ channel.youtube_id }}</code></td>
+          <td>{{ 'yes — all comments captured' if channel.is_owned else 'no — term match required' }}</td>
+          <td class="num">{{ channel.videos }}</td>
+          <td>{{ channel.last_polled_at.strftime('%Y-%m-%d %H:%M') if channel.last_polled_at else 'never' }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Videos</h2>
+  <p class="sub">Comments switched off is an ordinary state, not a failure — the harvester records it and moves on.</p>
+  <table>
+    <thead><tr><th>Video</th><th>Comments</th><th class="num">Mentions</th><th>Retention</th></tr></thead>
+    <tbody>
+      {% for video in videos %}
+        <tr>
+          <td>{{ video.title[:62] }}</td>
+          <td>{{ 'disabled' if video.comments_disabled else 'open' }}</td>
+          <td class="num">{{ video.mentions }}</td>
+          <td>
+            {% if video.purged %}purged
+            {% else %}<span class="expiry-pill {{ 'soon' if video.days_left <= 5 }}">{{ video.days_left }}d left</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Quota costs</h2>
+  <p class="sub">The documented unit price of every method this project calls. An unpriced method is rejected rather than guessed at.</p>
+  <table>
+    <thead><tr><th>Method</th><th class="num">Units per call</th></tr></thead>
+    <tbody>
+      {% for method, cost in method_costs %}
+        <tr><td><code>{{ method }}</code></td><td class="num">{{ cost }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="rationale">
+    10,000 units a day means either ~100 keyword searches or ~10,000 pages of
+    comments. The pipeline spends its budget on the second.
+  </p>
+</div>
+
+<div class="card">
+  <h2>Retention</h2>
+  <p class="sub">A policy obligation, not a preference.</p>
+  <p>
+    {{ retention.purged_comments }} comment(s) and {{ retention.purged_videos }} video(s)
+    have been purged; {{ retention.retained_comments }} comment(s) are held, with
+    {{ retention.due_for_refresh }} due for refresh and {{ retention.overdue }} overdue.
+  </p>
+  <p class="rationale">
+    Purging nulls the text, the title and the author name but keeps the row, so
+    aggregate counts stay valid while the content does not survive. The
+    pseudonymous author hash survives so repeat-commenter analysis keeps working.
+    Cached alert bodies are scrubbed in the same pass — a purged comment still
+    quoted in an old alert is still a retained copy.
+  </p>
+</div>
+
+{% endblock %}

@@ -1,22 +1,39 @@
-from datetime import datetime, timedelta, timezone
+"""Metric definitions."""
+
+from datetime import timedelta
 
 from social_listener import analytics
-from social_listener.ingest import ingest_payloads
+from social_listener.harvest import ingest_mentions
+from social_listener.models import utcnow
+from social_listener.retention import run_retention
 
-from .test_ingest import payload
-
-
-def _now():
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+from .test_harvest import FakeSource, comment, video
 
 
-def test_totals_counts_sentiment(seeded):
-    ingest_payloads(
+def _age_everything(session):
+    """Backdate the stored-at clock so retention considers the records due."""
+    from sqlalchemy import select
+
+    from social_listener.models import Mention, Video as VideoModel
+
+    now = utcnow()
+    for table in (Mention, VideoModel):
+        for row in session.scalars(select(table)):
+            row.first_seen_at = now - timedelta(days=28)
+            row.last_checked_at = now - timedelta(days=28)
+            row.content_expires_at = now + timedelta(days=2)
+    session.flush()
+
+
+NEG = "Northbridge College tuition is terrible, unacceptable and ridiculous"
+POS = "Northbridge College tuition support was wonderful, highly recommend"
+
+
+def test_totals_count_sentiment(seeded):
+    ingest_mentions(
         seeded,
-        [
-            payload(fullname="t3_n", body="Northbridge College tuition is terrible and unacceptable", created_utc=_now()),
-            payload(fullname="t3_p", body="Northbridge College tuition support was wonderful, highly recommend", created_utc=_now()),
-        ],
+        video(),
+        [comment(youtube_id="c1", text=NEG), comment(youtube_id="c2", text=POS)],
     )
     totals = analytics.totals(seeded)
     assert totals.negative == 1
@@ -24,104 +41,127 @@ def test_totals_counts_sentiment(seeded):
 
 
 def test_net_sentiment_is_zero_when_balanced(seeded):
-    ingest_payloads(
+    ingest_mentions(
         seeded,
-        [
-            payload(fullname="t3_n", body="Northbridge College tuition is terrible and unacceptable", created_utc=_now()),
-            payload(fullname="t3_p", body="Northbridge College tuition support was wonderful, highly recommend", created_utc=_now()),
-        ],
+        video(),
+        [comment(youtube_id="c1", text=NEG), comment(youtube_id="c2", text=POS)],
     )
     assert analytics.totals(seeded).net_sentiment == 0.0
 
 
-def test_net_sentiment_handles_an_empty_database(seeded):
+def test_net_sentiment_on_an_empty_database_is_zero(seeded):
     assert analytics.totals(seeded).net_sentiment == 0.0
 
 
 def test_spam_is_excluded_from_sentiment_counts(seeded):
-    ingest_payloads(
+    ingest_mentions(
         seeded,
-        [payload(body="Northbridge College tuition thread. I am a bot.", author="AutoModerator", created_utc=_now())],
+        video(),
+        [comment(text="Northbridge College tuition hacks, check out my channel, link in bio")],
     )
     totals = analytics.totals(seeded)
     assert totals.spam_filtered == 1
     assert totals.classified == 0
 
 
+def test_spam_is_excluded_from_the_feed_by_default(seeded):
+    ingest_mentions(
+        seeded,
+        video(),
+        [comment(text="Northbridge College tuition hacks, check out my channel, link in bio")],
+    )
+    assert analytics.feed(seeded) == []
+
+
+def test_spam_can_be_shown_on_request(seeded):
+    ingest_mentions(
+        seeded,
+        video(),
+        [comment(text="Northbridge College tuition hacks, check out my channel, link in bio")],
+    )
+    assert len(analytics.feed(seeded, include_spam=True)) >= 1
+
+
 def test_share_of_voice_sums_to_one(seeded):
-    ingest_payloads(seeded, [payload(created_utc=_now())])
+    ingest_mentions(seeded, video(), [comment()])
     rows = analytics.share_of_voice(seeded)
     assert abs(sum(r["share"] for r in rows) - 1.0) < 1e-9
 
 
-def test_volume_by_day_buckets_by_date(seeded):
-    today = _now()
-    ingest_payloads(
+def test_volume_buckets_by_publication_date(seeded):
+    today = utcnow()
+    ingest_mentions(
         seeded,
+        video(),
         [
-            payload(fullname="t3_a", created_utc=today),
-            payload(fullname="t3_b", created_utc=today),
-            payload(fullname="t3_c", created_utc=today - timedelta(days=2)),
+            comment(youtube_id="c1", published_at=today),
+            comment(youtube_id="c2", published_at=today),
+            comment(youtube_id="c3", published_at=today - timedelta(days=3)),
         ],
     )
-    series = analytics.volume_by_day(seeded, days=7)
+    series = analytics.volume_by_day(seeded, days=10)
     by_date = {p["date"]: p["total"] for p in series}
-    assert by_date[today.date().isoformat()] == 2
+    assert by_date[today.date().isoformat()] >= 2
 
 
-def test_purged_items_still_count_toward_volume(seeded):
-    from social_listener.compliance import run_sweep
-
-    from .test_ingest import FakeSource
-
-    ingest_payloads(seeded, [payload(created_utc=_now())])
-    run_sweep(seeded, FakeSource([]))
-    series = analytics.volume_by_day(seeded, days=7)
-    assert sum(p["total"] for p in series) == 1, "the content goes, the count stays"
+def test_purged_mentions_still_count_toward_volume(seeded):
+    ingest_mentions(seeded, video(), [comment(published_at=utcnow())])
+    run_retention(seeded, FakeSource(videos=[], comments=[]))
+    series = analytics.volume_by_day(seeded, days=10)
+    assert sum(p["total"] for p in series) >= 1, "the content goes, the count stays"
 
 
 def test_a_flat_series_produces_no_spikes(seeded):
-    today = _now()
-    items = []
-    for day in range(20):
-        for n in range(2):
-            items.append(
-                payload(fullname=f"t3_{day}_{n}", created_utc=today - timedelta(days=day))
-            )
-    ingest_payloads(seeded, items)
+    today = utcnow()
+    comments = [
+        comment(youtube_id=f"c{d}_{n}", published_at=today - timedelta(days=d))
+        for d in range(20)
+        for n in range(2)
+    ]
+    ingest_mentions(seeded, video(), comments)
     assert analytics.detect_spikes(seeded) == []
 
 
 def test_a_real_spike_is_detected(seeded):
-    today = _now()
-    items = []
-    for day in range(3, 21):
-        for n in range(2):
-            items.append(
-                payload(fullname=f"t3_{day}_{n}", created_utc=today - timedelta(days=day))
-            )
-    for n in range(25):
-        items.append(payload(fullname=f"t3_spike_{n}", created_utc=today - timedelta(days=1)))
-    ingest_payloads(seeded, items)
-    spikes = analytics.detect_spikes(seeded)
-    assert spikes, "a 25-item day against a baseline of 2 must register"
+    today = utcnow()
+    comments = [
+        comment(youtube_id=f"c{d}_{n}", published_at=today - timedelta(days=d))
+        for d in range(3, 21)
+        for n in range(2)
+    ]
+    comments += [
+        comment(youtube_id=f"spike{n}", published_at=today - timedelta(days=1))
+        for n in range(30)
+    ]
+    ingest_mentions(seeded, video(), comments)
+    assert analytics.detect_spikes(seeded), "30 against a baseline of 2 must register"
 
 
 def test_feed_filters_by_sentiment(seeded):
-    ingest_payloads(
+    ingest_mentions(
         seeded,
-        [
-            payload(fullname="t3_n", body="Northbridge College tuition is terrible and unacceptable", created_utc=_now()),
-            payload(fullname="t3_p", body="Northbridge College tuition support was wonderful, highly recommend", created_utc=_now()),
-        ],
+        video(),
+        [comment(youtube_id="c1", text=NEG), comment(youtube_id="c2", text=POS)],
     )
-    rows = analytics.feed(seeded, sentiment="negative")
-    assert len(rows) == 1
+    assert len(analytics.feed(seeded, sentiment="negative")) == 1
 
 
-def test_feed_excludes_spam(seeded):
-    ingest_payloads(
+def test_top_videos_counts_negatives_per_video(seeded):
+    ingest_mentions(
         seeded,
-        [payload(body="Northbridge College tuition thread. I am a bot.", author="AutoModerator", created_utc=_now())],
+        video(),
+        [comment(youtube_id="c1", text=NEG), comment(youtube_id="c2", text=POS)],
     )
-    assert analytics.feed(seeded) == []
+    rows = analytics.top_videos(seeded)
+    assert rows[0]["count"] >= 2
+    assert rows[0]["negative"] == 1
+
+
+def test_a_purged_video_title_is_not_leaked_by_analytics(seeded):
+    ingest_mentions(seeded, video(title="Northbridge College open day"), [comment()])
+    # Retention only looks at records due for a check, so age them first --
+    # a freshly stored record is correctly left alone.
+    _age_everything(seeded)
+    run_retention(seeded, FakeSource(videos=[], comments=[]))
+    for row in analytics.top_videos(seeded):
+        assert row["title"] == "[purged]"

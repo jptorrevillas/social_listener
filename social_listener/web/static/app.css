@@ -207,3 +207,55 @@ details.table-view summary { cursor: pointer; color: var(--text-secondary); font
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .flash { background: var(--seq-200); color: var(--text-primary); padding: 11px 14px; border-radius: var(--radius); margin-bottom: 16px; font-size: 13px; }
 .empty { color: var(--text-muted); padding: 22px 0; }
+
+/* -- quota meter ------------------------------------------------------- */
+.meter { margin-top: 4px; }
+.meter-track {
+  height: 12px;
+  background: var(--grid);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.meter-fill { height: 100%; border-radius: 6px; background: var(--seq-450); }
+.meter-fill.warning { background: var(--status-warning); }
+.meter-fill.critical { background: var(--status-critical); }
+.meter-legend {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.meter-note { color: var(--text-muted); font-size: 12px; margin-top: 5px; }
+.state-good { color: var(--status-good); }
+.state-warning { color: var(--text-secondary); }
+.state-critical { color: var(--status-critical); }
+
+/* -- retention --------------------------------------------------------- */
+.retention-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.retention-cell {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.retention-cell .n { font-size: 19px; }
+.retention-cell .k { color: var(--text-muted); font-size: 11.5px; margin-top: 2px; }
+.expiry-pill {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.expiry-pill.soon { color: var(--status-critical); border-color: var(--status-critical); }
+.video-row { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.video-row:last-child { border-bottom: none; }
+.video-row a { text-decoration: none; }
+.video-meta { color: var(--text-muted); white-space: nowrap; font-size: 12px; }
+.kind-tag { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }

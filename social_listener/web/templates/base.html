@@ -3,31 +3,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Social Listener{% endblock %}</title>
+  <title>{% block title %}Social Listener — YouTube{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
   {% if is_demo %}
     <div class="demo-banner">
-      DEMO DATA — NOT REAL REDDIT CONTENT
-      <span>Every post below is synthetic, generated from templates. “Northbridge College” is a fictional institution. No Reddit credentials are configured, so nothing here was captured from Reddit.</span>
+      DEMO DATA — NOT REAL YOUTUBE CONTENT
+      <span>Every video and comment below is synthetic, generated from templates. “Northbridge College” is a fictional institution. No API key is configured, so nothing here was captured from YouTube and no quota has been spent.</span>
     </div>
   {% else %}
     <div class="demo-banner live-banner">
-      LIVE MODE — capturing from the Reddit Data API
-      <span>Rate-limited to the configured budget and steered by Reddit’s own X-Ratelimit headers.</span>
+      LIVE MODE — capturing from the YouTube Data API
+      <span>{{ quota.spent }} of {{ quota.limit }} units spent today; resets in {{ quota_resets_in }}.</span>
     </div>
   {% endif %}
 
   <header class="masthead">
     <div>
       <h1>Social Listener</h1>
-      <p>Reddit mention capture, classification and review</p>
+      <p>YouTube comment capture, classification and review</p>
     </div>
     <nav>
       <a href="/" class="{{ 'active' if request.url.path == '/' }}">Dashboard</a>
       <a href="/feed" class="{{ 'active' if request.url.path == '/feed' }}">Review feed</a>
-      <a href="/terms" class="{{ 'active' if request.url.path == '/terms' }}">Configuration</a>
+      <a href="/config" class="{{ 'active' if request.url.path == '/config' }}">Configuration</a>
     </nav>
   </header>
 

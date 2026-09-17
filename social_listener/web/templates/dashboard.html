@@ -5,36 +5,75 @@
 
 <div class="tiles">
   <div class="tile">
-    <div class="label">Mentions captured</div>
-    <div class="value">{{ totals.items }}</div>
-    <div class="note">{{ totals.matched_items }} matched a watch term</div>
+    <div class="label">Mentions held</div>
+    <div class="value">{{ totals.mentions }}</div>
+    <div class="note">across {{ totals.videos }} video(s)</div>
   </div>
   <div class="tile">
     <div class="label">Net sentiment</div>
     <div class="value {{ 'negative' if totals.net_sentiment < 0 else 'positive' }}">
       {{ '%+.0f'|format(totals.net_sentiment * 100) }}%
     </div>
-    <div class="note">vader-rules 0.1.0</div>
+    <div class="note">vader-rules-yt 0.1.0</div>
   </div>
   <div class="tile">
     <div class="label">Open alerts</div>
     <div class="value">{{ totals.alerts_open }}</div>
-    <div class="note">severity 4–5, one per thread</div>
+    <div class="note">severity 4–5, one per video</div>
   </div>
   <div class="tile">
-    <div class="label">Bots filtered</div>
+    <div class="label">Spam filtered</div>
     <div class="value">{{ totals.spam_filtered }}</div>
     <div class="note">before any model ran</div>
   </div>
   <div class="tile">
     <div class="label">Purged</div>
-    <div class="value">{{ totals.tombstoned }}</div>
-    <div class="note">deleted upstream, scrubbed here</div>
+    <div class="value">{{ totals.purged }}</div>
+    <div class="note">30-day rule or deleted upstream</div>
   </div>
   <div class="tile">
-    <div class="label">Estimated reach</div>
+    <div class="label">Video views</div>
     <div class="value">{{ '{:,}'.format(reach) }}</div>
-    <div class="note">a model, not a measurement</div>
+    <div class="note">real counts, but not comment reach</div>
+  </div>
+</div>
+
+<div class="two-col">
+  <div class="card">
+    <h2>Today’s quota</h2>
+    <p class="sub">
+      10,000 units a day, reset at midnight Pacific. A keyword search costs
+      {{ search_cost }} units; a page of comments costs {{ comment_cost }}. That
+      asymmetry is why the harvester reads comments freely and searches sparingly.
+    </p>
+    {{ quota_meter|safe }}
+    <h2 style="margin-top:18px">Where the units went</h2>
+    <p class="sub">Per API method, today.</p>
+    {{ quota_breakdown|safe }}
+  </div>
+
+  <div class="card">
+    <h2>Retention position</h2>
+    <p class="sub">
+      YouTube’s developer policies require stored data to be deleted or refreshed
+      within {{ retention.retention_days }} days. A successful refresh restarts the
+      clock; anything that cannot be refreshed is purged. Records are also
+      re-verified every {{ reconcile_days }} days so a deletion is noticed promptly
+      rather than whenever the clock comes round.
+    </p>
+    <div class="retention-grid">
+      <div class="retention-cell"><div class="n">{{ retention.retained_comments }}</div><div class="k">comments held</div></div>
+      <div class="retention-cell"><div class="n">{{ retention.retained_videos }}</div><div class="k">videos held</div></div>
+      <div class="retention-cell"><div class="n">{{ retention.due_for_refresh }}</div><div class="k">due for refresh</div></div>
+      <div class="retention-cell"><div class="n">{{ retention.overdue }}</div><div class="k">overdue</div></div>
+      <div class="retention-cell"><div class="n">{{ retention.purged_comments }}</div><div class="k">comments purged</div></div>
+      <div class="retention-cell"><div class="n">{{ retention.purged_videos }}</div><div class="k">videos purged</div></div>
+    </div>
+    <p class="rationale">
+      Counts survive a purge; the text does not. Trend history lives in a
+      metrics table that holds no text at all, which is what the derived-metrics
+      carve-out permits keeping longer.
+    </p>
   </div>
 </div>
 
@@ -48,22 +87,19 @@
   </div>
   <div class="chart-scroll">{{ volume_chart|safe }}</div>
 
-  {% if spikes %}
-    {% for spike in spikes %}
-      <div class="flash" style="margin-top:14px">
-        <strong>Spike detected {{ spike.date }}</strong> — {{ spike.total }} mentions against a
-        trailing baseline of {{ spike.baseline_mean }} (threshold {{ spike.threshold }}, mean + 3σ).
-      </div>
-    {% endfor %}
-  {% endif %}
+  {% for spike in spikes %}
+    <div class="flash" style="margin-top:14px">
+      <strong>Spike detected {{ spike.date }}</strong> — {{ spike.total }} mentions against a
+      trailing baseline of {{ spike.baseline_mean }} (threshold {{ spike.threshold }}, mean + 3σ).
+    </div>
+  {% endfor %}
 
   <details class="table-view">
     <summary>Table view</summary>
     <table>
       <thead><tr><th>Date</th><th class="num">Negative</th><th class="num">Neutral</th><th class="num">Positive</th><th class="num">Total</th></tr></thead>
       <tbody>
-        {% for point in series %}
-          {% if point.total %}
+        {% for point in series %}{% if point.total %}
           <tr>
             <td>{{ point.date }}</td>
             <td class="num">{{ point.negative }}</td>
@@ -71,8 +107,7 @@
             <td class="num">{{ point.positive }}</td>
             <td class="num">{{ point.total }}</td>
           </tr>
-          {% endif %}
-        {% endfor %}
+        {% endif %}{% endfor %}
       </tbody>
     </table>
   </details>
@@ -94,42 +129,55 @@
 <div class="two-col">
   <div class="card">
     <h2>Where the conversation is</h2>
-    <p class="sub">Communities on the poll loop, by captured volume.</p>
-    {{ sub_bars|safe }}
+    <p class="sub">Videos carrying the most mentions.</p>
+    {% for video in videos %}
+      <div class="video-row">
+        <a href="{{ video.url }}" rel="noopener">{{ video.title }}</a>
+        <span class="video-meta">{{ video.count }} mention(s) · {{ video.negative }} neg</span>
+      </div>
+    {% else %}
+      <p class="empty">No videos yet.</p>
+    {% endfor %}
   </div>
 
   <div class="card">
     <h2>Open alerts</h2>
-    <p class="sub">Severity 4–5 only. Everything below that is queryable but silent.</p>
-    {% if alerts %}
-      {% for alert in alerts %}
-        <div class="item">
-          <div class="item-head">
-            <span class="pill sev-{{ alert.severity }}">Severity {{ alert.severity }}</span>
-            <strong>{{ alert.headline }}</strong>
-          </div>
-          <p class="item-body">{{ alert.text }}</p>
-          <div class="item-meta">
-            <span class="rationale">{{ alert.detail }}</span>
-          </div>
+    <p class="sub">Severity 4–5 only, one per video. Everything below is queryable but silent.</p>
+    {% for alert in alerts %}
+      <div class="item">
+        <div class="item-head">
+          <span class="pill sev-{{ alert.severity }}">Severity {{ alert.severity }}</span>
+          <strong>{{ alert.headline }}</strong>
         </div>
-      {% endfor %}
+        <p class="item-body {{ 'purged' if alert.purged }}">{{ alert.text }}</p>
+        <div class="item-meta">
+          <span class="rationale">{{ alert.detail }}</span>
+          {% if alert.url and not alert.purged %}<a href="{{ alert.url }}" rel="noopener">watch</a>{% endif %}
+        </div>
+        <form method="post" action="/actions/acknowledge" style="margin-top:7px">
+          <input type="hidden" name="alert_id" value="{{ alert.id }}">
+          <button class="btn" type="submit">Acknowledge</button>
+        </form>
+      </div>
     {% else %}
       <p class="empty">No open alerts.</p>
-    {% endif %}
+    {% endfor %}
   </div>
 </div>
 
 <div class="card">
   <h2>Run the pipeline</h2>
   <p class="sub">
-    A poll cycle re-fetches every tracked community; the sweep re-checks retained items
-    against Reddit and purges anything deleted upstream. Both are safe to run repeatedly —
-    the dedupe key is structural.
+    Harvest reads tracked channels and their comments — all 1-unit calls.
+    Discovery runs keyword searches at {{ search_cost }} units each, so it is capped
+    and runs last. Retention refreshes or purges under the {{ retention.retention_days }}-day
+    rule and always keeps a reserve of units, because refreshing is an obligation
+    while capturing more is not.
   </p>
   <div class="actions">
-    <form method="post" action="/actions/poll"><button class="btn" type="submit">Run poll cycle</button></form>
-    <form method="post" action="/actions/sweep"><button class="btn" type="submit">Run compliance sweep</button></form>
+    <form method="post" action="/actions/harvest"><button class="btn" type="submit">Harvest channels</button></form>
+    <form method="post" action="/actions/discover"><button class="btn" type="submit">Run discovery ({{ search_cost }} units/search)</button></form>
+    <form method="post" action="/actions/retention"><button class="btn" type="submit">Run retention pass</button></form>
   </div>
 </div>
 

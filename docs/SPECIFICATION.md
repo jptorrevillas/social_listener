@@ -1,789 +1,489 @@
-# Technical Specification Research: A Reddit Social Listening Tool
+# Technical Specification: A YouTube Social Listening Tool
 
-Research note. Last revised 10 September 2026.
+Research note. Last revised 17 September 2026.
 
-**Scope.** This document specifies what it takes to build a system that watches
-Reddit for mentions of a set of terms, classifies them, stores them, and alerts
-a human. It covers data acquisition, the API's hard limits, ingestion
-architecture, the data model, enrichment, alerting, cost, and compliance.
-
-**Status.** Research and specification only. No implementation exists in this
-repository yet; every section below is a design position to be argued with, not
-a description of shipped code. Figures sourced from secondary reporting are
+**Status.** Implemented. Where the code and this document disagree, the code
+wins and this document is wrong — say so. Figures from secondary reporting are
 marked as such.
+
+**History.** This project was first specified and built against Reddit. It was
+rebuilt for YouTube because Reddit's Data API now gates access behind manual
+approval with a non-commercial free tier and a ~$12,000/month commercial cliff,
+while YouTube needs only a self-service API key. The Reddit specification is in
+this repository's git history if the comparison is useful.
 
 ---
 
 ## 1. Executive summary
 
-Five findings drive every design decision that follows.
+Five findings drive every design decision below.
 
-1. **There is no firehose.** Reddit exposes no streaming or webhook API for
-   public content. Every "real-time" Reddit tool in existence is polling
-   listing endpoints on a timer. Latency is a budget decision, not a platform
-   feature.
-2. **The rate limit is the architecture.** 100 queries per minute per OAuth
-   client — about 144,000 calls/day — is the single scarce resource. The whole
-   ingestion design is an exercise in spending those calls well.
-3. **The free tier is non-commercial, and access is now gated.** Since the
-   Responsible Builder Policy update (5 June 2026), new OAuth clients go
-   through manual approval rather than self-service registration, and
-   commercial use requires written approval and a negotiated licence.
-4. **The commercial cliff is the reason this product category thinned out.**
-   Reported commercial terms are ~$0.24 per 1,000 calls with a bundled tier
-   around $12,000/month for 50M calls. There is nothing between free and that.
-   GummySearch — the best-known Reddit listening tool — stopped new signups on
-   30 November 2025 citing exactly this.
-5. **Historical coverage is a separate problem from live coverage.** Listing
-   endpoints cap at ~1,000 items per query, so the Data API cannot answer
-   "everything ever said about X". Backfill needs an external archive
-   (Arctic Shift, PullPush) with its own, weaker guarantees.
+1. **The scarce resource is a budget, not a rate.** YouTube charges requests
+   rather than throttling them: 10,000 units per day, reset at midnight
+   Pacific. This is the deepest difference from Reddit and it reshapes the
+   whole pipeline.
+2. **Cost asymmetry decides the capture strategy.** `search.list` costs **100
+   units**; `commentThreads.list` costs **1**. Searching is ~100× more
+   expensive than harvesting, so the pipeline discovers rarely and harvests
+   generously. Getting this backwards spends the entire day in 100 calls.
+3. **Retention is mandatory and short.** Stored API data must be **deleted or
+   refreshed within 30 calendar days**, and kept consistent with what YouTube
+   currently serves. A derived-metrics carve-out allows *counts* to live up to
+   36 months, but not text. This is a stronger obligation than Reddit's
+   delete-on-delete rule and it is an engine, not a checkbox.
+4. **Access is not gated.** An API key is self-service. There is no approval
+   process, no non-commercial restriction on basic read use, and no pricing
+   cliff — which is why this platform, not Reddit, is where the project should
+   have started.
+5. **Comments-off is ordinary.** A large share of real videos have comments
+   disabled, and the API returns `commentsDisabled` as a 403. Treating that as
+   an error makes a listener that falls over constantly.
 
-**Recommended shape:** a scoped, keyword-and-subreddit-driven poller on the free
-tier, with an archive-backed one-time backfill, LLM-assisted classification, and
-a strict delete-compliance job. Budget the API calls explicitly; treat the
-100 QPM ceiling as a design constraint from day one, not a scaling concern.
+**Recommended shape:** track channels (1 unit per channel via their uploads
+playlist), harvest comments freely, search sparingly and last, and run the
+retention engine with a reserved slice of budget that capture is never allowed
+to consume.
 
 ---
 
-## 2. Data acquisition options
+## 2. Data access
 
-| Route | Coverage | Latency | Cost | Legal standing | Verdict |
-|---|---|---|---|---|---|
-| **Reddit Data API (OAuth)** | Live + ~1,000 items back per query | Poll-bound; 30s–5min achievable | Free (non-commercial) / negotiated | Sanctioned, with approval | **Primary** |
-| **Arctic Shift** | 2005→present, ~2.5B items, monthly dumps | 4–6 week lag | Free | Third-party archive | **Backfill** |
-| **PullPush** | Cross-subreddit historical search | Hours–days | Free | Third-party archive, no SLA | Fallback only |
-| **Academic Torrents dumps** | ~4 TB, 40k subreddits, 2005–2025 | Monthly | Free | Research use | Bulk corpus / model training |
-| **Commercial resellers** (Apify, SocialCrawl, redditapis, et al.) | Varies | Varies | ~$0.002–0.30 / call | Reseller's risk, not yours | Escape hatch if approval is denied |
-| **HTML scraping / old.reddit** | Anything visible | Any | Infra only | **Violates the Developer Terms** | Do not |
+| Route | Coverage | Cost | Standing | Verdict |
+|---|---|---|---|---|
+| **YouTube Data API v3** | Public videos, comments, replies, stats | Free, 10k units/day | Sanctioned, self-service key | **The only route used** |
+| Quota increase (audit form) | Same, higher ceiling | Free, but reviewed | Sanctioned | If 10k/day binds |
+| Scraping | Anything visible | Infra only | **Violates the ToS** | Do not |
 
 ### Why not scraping
 
-Beyond the terms issue, scraping Reddit is operationally worse than it looks:
-Cloudflare challenges, `.json` suffix endpoints that are rate-limited more
-aggressively than OAuth, no `X-Ratelimit-*` headers to steer by, and no legal
-basis for retaining what you collect. The 100 QPM free tier is more generous
-than a residential-proxy budget of comparable throughput. Use the API.
+Beyond the terms problem, scraping YouTube is operationally worse than it
+looks, and the API's free tier is more generous than an equivalent proxy
+budget. There is also no legal basis for retaining what you collect. Use the
+API.
 
-### On the archives
+### What the API will not give you
 
-Arctic Shift is the practical Pushshift successor: free, unauthenticated,
-roughly 120k requests/hour, published as Parquet on Hugging Face and updated
-monthly. Its important limitation for a listening tool is that **full-text
-search is scoped to a single subreddit** — there is no global keyword search.
-PullPush retains cross-subreddit search (the only free source that does) but
-runs near 1,000 req/hour with a documented history of outages.
-
-Design consequence: **the archive gives you depth in known communities, not
-discovery across unknown ones.** Discovery of new communities must come from
-the live API's `/search` endpoints.
+- **No firehose.** No streaming or webhook for public comments; everything is
+  polling on a timer, exactly as on Reddit.
+- **No global comment search.** `commentThreads.list` is per-video. Finding
+  comments about a subject means finding the *videos* first, then reading them.
+- **Only ~5 inline replies per thread.** Beyond that you get a count, and
+  fetching the rest costs another call per thread.
+- **`search.list` is not exhaustive** and is capped at 50 results a page.
 
 ---
 
-## 3. Authentication and rate limits
-
-### 3.1 OAuth
+## 3. Authentication
 
 | Item | Value |
 |---|---|
-| Token endpoint | `POST https://www.reddit.com/api/v1/access_token` |
-| API host | `https://oauth.reddit.com` |
-| Grant for a server-side listener | `client_credentials` (confidential client) |
-| Token lifetime | **1 hour**; no refresh token issued under `client_credentials` |
-| Scope needed for read-only listening | `read` |
-| App type to register | *script* (own hardware, holds a secret) or *web* |
+| Auth for public read | **API key**, as a `key=` query parameter |
+| Endpoint base | `https://www.googleapis.com/youtube/v3` |
+| OAuth required? | Only for private data on your own channel |
+| Approval required? | No |
 
-Register as a **script** app if the listener runs on infrastructure you control
-and never acts on behalf of an end user. `client_credentials` gives
-application-only access, which is all a listener needs — it reads public
-content and never posts.
+An API key is enough for everything this project does: it reads public videos,
+comments and statistics, and never writes. That is the single biggest practical
+advantage over Reddit, where the approval process is the riskiest unknown in
+the whole plan.
 
-Token handling: refresh at ~50 minutes, cache the token in Redis (not
-per-process) so a fleet of workers shares one token, and treat a `401` as
-"refresh once, then retry once" rather than a fatal error.
-
-### 3.2 User-Agent
-
-Mandatory format, enforced:
-
-```
-<platform>:<app ID>:<version> (by /u/<reddit username>)
-```
-
-e.g. `server:com.example.listener:v0.3.1 (by /u/example_ops)`
-
-Never spoof a browser. Include a real version number — Reddit uses it to block
-specific buggy client versions rather than the whole app.
-
-### 3.3 Rate limits
-
-| Client | Limit |
-|---|---|
-| OAuth-authenticated | **100 QPM per client ID**, averaged over a 10-minute window |
-| Unauthenticated | ~10 QPM |
-
-The limit is **per API key, not per end user** — a multi-tenant product does
-not get more headroom by adding customers, which is precisely the economic
-trap that killed the mid-market tools.
-
-Three headers come back on every call and are the only reliable source of
-truth:
-
-```
-X-Ratelimit-Used        requests consumed this period
-X-Ratelimit-Remaining   requests left this period
-X-Ratelimit-Reset       seconds until the window resets
-```
-
-**Note on conflicting figures.** Reddit's archived developer wiki still states
-60 requests/minute. Current policy documentation and practice is 100 QPM
-averaged over 10 minutes. Build the limiter to *read the headers* and treat any
-hard-coded number as a fallback — that way a policy change degrades throughput
-instead of causing a ban.
-
-### 3.4 Limiter design
-
-- A single **Redis token bucket** shared by all workers, refilled from
-  `X-Ratelimit-Remaining` after each call rather than from a static assumption.
-- Reserve ~15% of the budget as headroom for retries, hydration, and
-  delete-compliance sweeps.
-- On `429`: exponential backoff from 2s, honour `X-Ratelimit-Reset`, and
-  **shed low-priority work first** (revisits before discovery).
-- Per-worker concurrency cap so a burst of workers cannot collectively blow the
-  10-minute average.
+**Key hygiene:** a YouTube API key is a bearer credential with a billing
+consequence — an exposed key lets a stranger spend your daily quota. Restrict
+it to the YouTube Data API in the Cloud console, keep it out of version
+control, and rotate it if it leaks.
 
 ---
 
-## 4. Endpoint inventory
+## 4. Quota: the real constraint
 
-The endpoints that matter for listening, and what each one costs.
+### 4.1 Documented costs
 
-| Purpose | Endpoint | Yield | Notes |
-|---|---|---|---|
-| New posts in a subreddit | `GET /r/{sub}/new?limit=100` | ≤100 posts | The workhorse for tracked communities |
-| New comments in a subreddit | `GET /r/{sub}/comments?limit=100` | ≤100 comments | Flat, chronological — no tree walk needed |
-| Keyword search, one subreddit | `GET /r/{sub}/search?q=…&restrict_sr=1&sort=new` | ≤1,000 total | Reddit's index, not exhaustive |
-| Keyword search, site-wide | `GET /search?q=…&sort=new` | ≤1,000 total | Discovery of unknown communities |
-| Global comment stream | `GET /r/all/comments?limit=100` | ≤100 | Only viable for very high poll rates |
-| Hydrate / refresh by ID | `GET /api/info?id=t3_x,t1_y,…` | **100 IDs per call** | The cheapest call in the API |
-| Expand collapsed comment trees | `POST /api/morechildren` | Batch | Needs `link_id` + comma-separated ID36s |
-| Post + full comment tree | `GET /r/{sub}/comments/{id}` | One thread | Expensive; use only for threads that matter |
+| Method | Units | Role in the pipeline |
+|---|---|---|
+| `search.list` | **100** | Discovery. Capped and run last |
+| `videos.list` | 1 | Hydrate up to 50 ids per call |
+| `channels.list` | 1 | Resolve a channel's uploads playlist |
+| `playlistItems.list` | 1 | **A channel's uploads — 100× cheaper than searching for them** |
+| `commentThreads.list` | 1 | The workhorse; 1 unit per page of 100 |
+| `comments.list` | 1 | Retention refresh, by id |
 
-Three properties to design around:
+Daily allowance is **10,000 units**, reset at **midnight America/Los_Angeles** —
+not UTC and not local time.
 
-- **`limit` maxes at 100** (default 25). Always ask for 100.
-- **`before`/`after` are listing cursors, not timestamps.** They mean "before/
-  after in this listing", which is not the same as chronological order once
-  sorting or moderation intervenes.
-- **Listings terminate at ~1,000 items.** Ten pages of 100. This is the hard
-  ceiling on any single query and the reason backfill needs an archive.
+### 4.2 What that buys
 
-**`/api/info` is the efficiency lever.** One call refreshes 100 items. Any
-design that re-fetches items one at a time is spending 100× more budget than
-necessary. Always chunk into 100s, and diff the returned `name` values against
-what you requested — items missing from the response were deleted or removed,
-which is a signal in its own right (see [§7.4](#74-delete-compliance)).
+The arithmetic worth internalising:
+
+```
+10,000 units  =  100 keyword searches          (and nothing else)
+              =  10,000 pages of comments      (~1,000,000 comments)
+              =  or any mix, priced as above
+```
+
+Ten searches a day cost 1,000 units — 10% of everything — and return at most
+500 videos. The same 1,000 units would read a million comments. **Discovery is
+a luxury; harvesting is the product.**
+
+### 4.3 Ledger design
+
+- **Persisted in the database, not in memory.** An in-process counter forgets
+  the day's spend on restart and then overspends, and on YouTube that means
+  every call fails until midnight Pacific. `QuotaSpend` holds one row per
+  method per quota day.
+- **Charge after the call, not before.** YouTube bills a request whether or not
+  the response was useful, so a call that 403s still cost units and must still
+  be recorded.
+- **Reserve before the call.** A call the budget cannot cover is refused rather
+  than attempted.
+- **Unpriced methods are rejected.** A method with no entry in the cost table
+  raises rather than being guessed at — an unmeasured call is how a budget
+  silently disappears.
+- **A reserve is held back for retention.** Refreshing stored data is an
+  obligation; capturing more of it is not. Capture stops before the reserve is
+  touched.
+
+Graceful degradation falls out of this: as the budget runs down, searches stop
+first and comment harvesting continues, because the cheap call is also the
+valuable one.
 
 ---
 
 ## 5. Ingestion architecture
 
-Four independent loops, each with its own budget allocation and its own
-priority under rate-limit pressure.
+Four jobs, run in a deliberate order. The order is the most important thing in
+the design.
 
 ```
-                    ┌──────────────────────────────────────────┐
-                    │  Redis: token bucket + scheduler queues   │
-                    └──────────────────────────────────────────┘
-                        ▲          ▲          ▲          ▲
-        ┌───────────────┘   ┌──────┘    ┌─────┘     ┌────┘
-        │                   │           │           │
-   ┌────┴─────┐      ┌──────┴─────┐ ┌───┴─────┐ ┌───┴────────┐
-   │ DISCOVERY│      │ SUBREDDIT  │ │ REVISIT │ │ COMPLIANCE │
-   │  search  │      │   poll     │ │ hydrate │ │   sweep    │
-   │ site-wide│      │ new+comments│ │ /api/info│ │  /api/info │
-   └────┬─────┘      └──────┬─────┘ └───┬─────┘ └───┬────────┘
-        └────────────┬──────┴───────────┴───────────┘
-                     ▼
-              ┌──────────────┐
-              │  NORMALISE   │  one schema, stable IDs
-              │  + DEDUPE    │  fullname is the primary key
-              └──────┬───────┘
-                     ▼
-              ┌──────────────┐
-              │    MATCH     │  which watch terms did this hit?
-              └──────┬───────┘
-                     ▼
-              ┌──────────────┐
-              │   ENRICH     │  sentiment · intent · spam · topic
-              └──────┬───────┘
-                     ▼
-        ┌────────────┴────────────┐
-        ▼                         ▼
-   ┌─────────┐              ┌──────────┐
-   │  STORE  │              │  ALERT   │
-   │  MySQL  │              │ email/SMS│
-   └─────────┘              └──────────┘
+  1. RETENTION      refresh or purge. An obligation, never starved.
+        |           comments.list / videos.list -- 1 unit per 50 records
+        v
+  2. CHANNEL SWEEP  tracked channels' uploads
+        |           playlistItems.list -- 1 unit per channel
+        v
+  3. COMMENT HARVEST  the bulk of the useful data
+        |           commentThreads.list -- 1 unit per page of 100
+        v
+  4. DISCOVERY      keyword search, capped and last
+                    search.list -- 100 units per call
 ```
 
-### 5.1 Discovery loop
+Running discovery first would let ten searches eat a fifth of the day before a
+single comment was read.
 
-Site-wide `/search` per watch term, sorted by `new`, on a slow cadence
-(every 15–30 min). Purpose is **finding communities you are not yet tracking**,
-not primary capture — Reddit's search index is neither exhaustive nor
-immediate. When a term hits in an untracked subreddit more than *n* times in a
-window, promote that subreddit into the tracked set and let the fast loop own
-it.
+### 5.1 Channel sweep
 
-Budget: `terms × 1 call` per cycle. 30 terms every 20 minutes = 90 calls/hour.
+For each tracked channel, enumerate recent uploads via its **uploads playlist**
+(`playlistItems.list`, 1 unit) rather than `search.list` (100 units). Tracking
+a channel is therefore ~100× cheaper than searching for it, which is why the
+configuration is channel-first.
 
-### 5.2 Subreddit poll loop
+### 5.2 Comment harvest
 
-The primary capture path. For each tracked subreddit, poll `/new` and
-`/comments` at `limit=100`.
+`commentThreads.list` at `maxResults=100`, `order=time`, `textFormat=plainText`.
+Each page costs 1 unit. `textOriginal` is preferred over `textDisplay`, which
+carries HTML that would pollute both matching and sentiment.
 
-**Choosing the interval.** The constraint is that fewer than 100 new items must
-appear between two consecutive polls, or you silently lose the overflow. So:
+**Owned channels skip the keyword gate.** On a channel you own, every comment is
+addressed to you — someone complaining under your own enrolment video rarely
+names the institution — so requiring a term match there would discard most of
+what you need to read. Terms are still recorded when they hit; they stop being
+the admission test. This also means the spam lane earns its keep, because all
+the sub-for-sub and crypto bait on your own videos now arrives.
 
-```
-interval_seconds  ≤  (100 × safety_factor) / items_per_second
-```
+### 5.3 Discovery
 
-with `safety_factor ≈ 0.5` to absorb bursts. Measure `items_per_second` per
-subreddit from live data and re-tune nightly — a subreddit's rate varies by an
-order of magnitude between 03:00 and 20:00 local time. Adaptive intervals are
-worth building; a fixed cadence either wastes budget on quiet subreddits or
-drops data on busy ones.
+`search.list` per discovery-flagged term, `order=date`, windowed with
+`publishedAfter`. Purpose is finding conversations on channels you do not track.
+Hard-capped by a configurable share of the day's budget (default 20%), because
+it is the only part of the pipeline that can exhaust the budget by itself.
 
-**Budget.** `2 calls × subreddits × (3600 / interval)` per hour. Twenty
-subreddits at a 2-minute interval = 1,200 calls/hour ≈ 20 QPM — a fifth of the
-budget for solid coverage of a mid-sized community set.
+### 5.4 Deduplication
 
-### 5.3 Global stream
-
-Polling `/r/all/comments` continuously is theoretically possible but the
-arithmetic is unforgiving: at 100 QPM with `limit=100` you can pull at most
-10,000 comments/minute, and Reddit's global comment rate is of the same order.
-You would spend the entire budget to capture a fraction of the firehose with no
-headroom for anything else.
-
-**Do not build global capture on the free tier.** Scope by subreddit and
-keyword. Global capture is a data-licence purchase, not an engineering problem.
-
-### 5.4 Revisit loop
-
-Reddit content is mutable in ways that matter:
-
-| Field | Behaviour | Consequence |
-|---|---|---|
-| `score` | Volatile for ~48h, then near-static; fuzzed by anti-spam | Never treat first-seen score as final |
-| `num_comments` | Grows for days | Thread-importance ranking must be re-run |
-| `body` / `selftext` | Editable indefinitely | Sentiment can invert after capture |
-| `removed` / `deleted` | Any time, permanently | **Compliance obligation** |
-| `edited` | Timestamp or `false` | The cheapest change-detection signal |
-
-Schedule revisits on a decay curve — at +1h, +6h, +24h, +72h, +7d — and batch
-100 fullnames per `/api/info` call. Ten thousand tracked items at five revisits
-each is 500 calls total, spread across a week. Negligible.
-
-### 5.5 Backfill
-
-One-time, per new watch term or newly tracked subreddit:
-
-1. Pull the subreddit's Arctic Shift Parquet dump (or query PullPush for
-   cross-subreddit terms).
-2. Filter locally against the watch terms — no API budget spent.
-3. Insert with `provenance = 'archive'` so analytics can distinguish
-   archive-derived rows (which may be stale or reflect since-deleted content)
-   from live-captured ones.
-4. Optionally re-hydrate the most recent 5,000 via `/api/info` to get current
-   scores and to catch anything deleted since the dump.
-
-Accept the 4–6 week archive lag: the live loop owns everything newer.
+`youtube_id` is the natural key and the database enforces it. Overlapping
+harvest windows and retries guarantee duplicates by construction, so dedupe is
+structural rather than best-effort. Re-ingesting updates the mutable fields
+(like count, reply count, text, `updatedAt`) and restarts the retention clock.
 
 ---
 
 ## 6. Data model
 
-MySQL 8 DDL, matching this repository's existing conventions (`utf8mb4`,
-InnoDB, surrogate `BIGINT` keys alongside natural keys).
-
-```sql
--- What we are listening for.
-CREATE TABLE listening_term (
-    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
-    label           VARCHAR(120)  NOT NULL,
-    match_type      ENUM('literal','phrase','regex','boolean') NOT NULL DEFAULT 'phrase',
-    pattern         TEXT          NOT NULL,
-    negative_pattern TEXT         NULL,       -- exclusions, to kill known false positives
-    is_active       TINYINT(1)    NOT NULL DEFAULT 1,
-    created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_listening_term_label (label)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- Communities on the fast poll loop.
-CREATE TABLE listening_subreddit (
-    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
-    name                VARCHAR(80)  NOT NULL,        -- without the r/ prefix
-    poll_interval_secs  INT          NOT NULL DEFAULT 300,
-    observed_items_hour DECIMAL(10,2) NULL,           -- measured, drives the interval
-    source              ENUM('manual','discovered')   NOT NULL DEFAULT 'manual',
-    last_polled_at      DATETIME     NULL,
-    last_fullname_seen  VARCHAR(20)  NULL,            -- cursor for gap detection
-    is_active           TINYINT(1)   NOT NULL DEFAULT 1,
-    UNIQUE KEY uq_listening_subreddit_name (name)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- One row per captured post or comment. Reddit's fullname is the natural key.
-CREATE TABLE listening_item (
-    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
-    fullname        VARCHAR(20)  NOT NULL,        -- t3_abc123 / t1_def456
-    kind            ENUM('post','comment') NOT NULL,
-    subreddit       VARCHAR(80)  NOT NULL,
-    author          VARCHAR(80)  NULL,            -- NULL once deleted
-    author_hash     CHAR(64)     NULL,            -- for analytics without retaining the handle
-    title           VARCHAR(400) NULL,            -- posts only
-    body            MEDIUMTEXT   NULL,
-    permalink       VARCHAR(400) NOT NULL,
-    parent_fullname VARCHAR(20)  NULL,
-    link_fullname   VARCHAR(20)  NULL,            -- owning submission, for comments
-    created_utc     DATETIME     NOT NULL,
-    first_seen_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_checked_at DATETIME     NULL,
-    score           INT          NULL,
-    num_comments    INT          NULL,
-    edited_at       DATETIME     NULL,
-    is_removed      TINYINT(1)   NOT NULL DEFAULT 0,
-    is_deleted      TINYINT(1)   NOT NULL DEFAULT 0,
-    purged_at       DATETIME     NULL,            -- when we tombstoned the content
-    provenance      ENUM('live','archive','manual') NOT NULL DEFAULT 'live',
-    UNIQUE KEY uq_listening_item_fullname (fullname),
-    KEY ix_listening_item_created (created_utc),
-    KEY ix_listening_item_sub_created (subreddit, created_utc),
-    KEY ix_listening_item_revisit (last_checked_at, is_deleted),
-    FULLTEXT KEY ft_listening_item_text (title, body)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- Which terms an item matched. An item can match several.
-CREATE TABLE listening_match (
-    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
-    item_id      BIGINT NOT NULL,
-    term_id      BIGINT NOT NULL,
-    matched_text VARCHAR(400) NULL,     -- the span that hit, for reviewer context
-    confidence   DECIMAL(4,3) NULL,
-    UNIQUE KEY uq_listening_match (item_id, term_id),
-    FOREIGN KEY (item_id) REFERENCES listening_item(id) ON DELETE CASCADE,
-    FOREIGN KEY (term_id) REFERENCES listening_term(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- Model output, versioned so a model change is re-runnable and auditable.
-CREATE TABLE listening_enrichment (
-    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
-    item_id         BIGINT       NOT NULL,
-    model_name      VARCHAR(120) NOT NULL,
-    model_version   VARCHAR(40)  NOT NULL,
-    sentiment       ENUM('positive','neutral','negative','mixed') NULL,
-    sentiment_score DECIMAL(4,3) NULL,
-    severity        TINYINT      NULL,            -- 1..5, drives alert routing
-    intent          VARCHAR(60)  NULL,            -- complaint / question / recommendation / …
-    topics          JSON         NULL,
-    is_spam         TINYINT(1)   NOT NULL DEFAULT 0,
-    rationale       TEXT         NULL,
-    created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_enrichment (item_id, model_name, model_version),
-    FOREIGN KEY (item_id) REFERENCES listening_item(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- Score/comment history, for velocity and spike detection.
-CREATE TABLE listening_metric_snapshot (
-    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
-    item_id      BIGINT   NOT NULL,
-    observed_at  DATETIME NOT NULL,
-    score        INT      NULL,
-    num_comments INT      NULL,
-    KEY ix_snapshot_item_time (item_id, observed_at),
-    FOREIGN KEY (item_id) REFERENCES listening_item(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+Channel   a channel we poll; `is_owned` changes the capture rule
+   |
+Video     the container. Stats, and whether comments are even open.
+   |
+Mention   the unit of listening: a comment, a reply, or a video whose own
+          title/description mentions a term. Everything downstream operates
+          on Mention, so the pipeline never branches on kind.
 ```
 
-Design notes:
+Supporting tables: `WatchTerm`, `Match` (with the span that hit), `Enrichment`
+(versioned), `MetricSnapshot` (**counts only, no text**), `Alert`, `QuotaSpend`.
 
-- **`fullname` is the deduplication key.** It is globally unique and stable
-  across every endpoint, so the same item arriving from the discovery loop, the
-  poll loop, and a retry all collapse to one row. Write with
-  `INSERT … ON DUPLICATE KEY UPDATE` and let the database enforce it — every
-  ingestion design generates duplicates by construction (retries, and the
-  deliberately overlapping poll windows that guarantee no gaps), so dedupe must
-  be structural, not best-effort.
-- **Enrichment is versioned and separate from the item.** Re-classifying a
-  year of history under a new model is then an insert, not a destructive update,
-  and A/B comparison of two models over the same corpus is a `GROUP BY`.
-- **`author_hash` alongside `author`.** Long-run analytics ("is this the same
-  complainant?") work off the hash, so the raw handle can be dropped on
-  deletion or on a privacy request without destroying the aggregates.
-- **`purged_at` rather than row deletion.** See below.
+Two deliberate choices:
+
+- **`MetricSnapshot` holds no text at all.** That is precisely what the
+  derived-metrics carve-out permits keeping for 36 months. A single text column
+  here would forfeit it, so the separation is the mechanism rather than a note.
+- **`author_hash` alongside `author_name`.** A SHA-256 of the author's channel
+  id, so "is this the same commenter again?" keeps working after the display
+  name and text have been purged.
+
+See `social_listener/models.py` for the authoritative schema.
 
 ---
 
-## 7. Correctness concerns specific to Reddit
+## 7. Retention: the 30-day engine
 
-### 7.1 Ordering
+The obligation: stored API data must be **deleted or refreshed within 30
+calendar days**, and stored data must track what YouTube currently serves.
+Derived metrics may be kept up to 36 months.
 
-`/new` is ordered by post time, but a listing cursor is not a clock. Sticky
-posts, moderation, and removal all perturb listings. Track
-`last_fullname_seen` per subreddit and detect gaps by checking whether that
-fullname still appears in the next page; if it does not, widen the page or fall
-back to a timestamp-bounded search.
+Three jobs:
 
-### 7.2 Edits
+| Job | What it does |
+|---|---|
+| **Refresh** | Re-fetch records approaching expiry. Success restarts the 30-day clock — the policy's own remedy, and what makes long-running monitoring permissible at all |
+| **Purge** | Anything that cannot be refreshed — expired, or gone from YouTube — has its text, title and author name nulled. The row survives so aggregates stay valid |
+| **Reconcile** | Records not verified in 7 days are re-checked regardless of expiry. Without this a deletion could sit unnoticed for ~25 days, and the policy asks for consistency "as quickly as possible" |
 
-`edited` is either `false` or a timestamp. Compare it against the stored
-`edited_at` on each revisit; when it moves, re-run enrichment and keep the
-prior enrichment row. Sentiment genuinely inverts — an edit that prepends
-"EDIT: resolved, support was great" to a complaint is common and matters.
+Implementation notes that matter:
 
-### 7.3 Score fuzzing
-
-Reddit deliberately fuzzes vote counts to frustrate manipulation. Scores are
-directionally meaningful and numerically approximate. Use them for ranking and
-thresholds, never as a precise metric in a report. Velocity (Δscore/Δt from
-`listening_metric_snapshot`) is more robust than any absolute score.
-
-### 7.4 Delete compliance
-
-**This is a contractual obligation, not a nicety.** Anyone accessing Reddit
-public content is required to stop displaying or using content once it is
-deleted by the user or by Reddit, and Reddit can and does revoke access for
-non-compliance.
-
-Implementation:
-
-- A **compliance sweep** re-checks every retained item via `/api/info` in
-  batches of 100, on a rolling cycle sized so the whole corpus is covered
-  within 24 hours. Items absent from the response, or returned with
-  `[deleted]`/`[removed]` bodies, are tombstoned.
-- **Tombstone, do not delete the row:** null out `body`, `title`, `author`,
-  set `is_deleted`/`is_removed` and `purged_at`. Aggregate counts survive; the
-  content does not.
-- **Purge derivatives too** — cached alert bodies, search index entries,
-  exported CSVs, notification payloads. A tombstoned item that is still quoted
-  in an old email is still a copy.
-- Corpus sizing check: 24-hour full coverage of *N* items costs `N/100` calls
-  per day. At 500,000 retained items that is 5,000 calls/day — about 3.5% of
-  the free-tier budget. Comfortable, and it puts a real ceiling on how much
-  history you can retain and still stay compliant.
-
-### 7.5 Bots and noise
-
-A material fraction of Reddit content is automated (AutoModerator, karma farms,
-repost bots, link aggregators). Filter before enrichment, not after — spending
-LLM tokens classifying AutoModerator boilerplate is pure waste.
-
-Cheap, effective heuristics: author on a known-bot list; body contains
-"I am a bot"; account age under a threshold; near-duplicate body text seen in
-≥3 subreddits within an hour (shingle hash); comment is a direct child of the
-submission and identical to a previous top-level comment.
+- **The clock runs from when *we* stored the record**, not from `publishedAt`. A
+  freshly captured five-year-old comment has a full 30 days.
+- **Refresh runs before purge.** In a healthy system with budget to spare,
+  almost nothing is purged for age — purge-for-age is what happens when refresh
+  is *impossible*.
+- **Derivatives are purged too.** A comment scrubbed from `mention.text` but
+  still quoted in a cached alert body is still a retained copy. Alert headlines
+  and details are scrubbed in the same pass.
+- **A refreshed video renews its video-kind mention.** They carry the same
+  title and description, so refreshing one without the other would purge a
+  record whose source had just been confirmed live.
+- **Corpus sizing.** Refreshing *N* records costs `N/50` units. 100,000
+  retained records is 2,000 units — 20% of a day. That, not disk, is what caps
+  how much history you can hold and stay compliant.
 
 ---
 
-## 8. Matching layer
+## 8. Matching
 
-Between capture and enrichment sits the question "does this item actually
-mention what we care about?" Getting this wrong is the dominant source of user
-complaints in every listening tool.
+Tiered, cheapest first: literal/phrase (word-boundary aware, NFKC-normalised)
+→ boolean (`AND`/`OR`/`NOT` over phrases) → regex → per-term negative patterns
+that veto an otherwise-good match.
 
-**Tiering.** Run cheap filters first and expensive ones only on survivors:
+Two notes:
 
-1. **Literal/phrase pass** — normalised casefold + Unicode NFKC, word-boundary
-   aware. Rejects ~99% of the stream.
-2. **Boolean expressions** — `("blue apron" OR blueapron) AND NOT "blue apron recipe card"`.
-   Users need `NOT` more than they expect; a `negative_pattern` column exists
-   for precisely this.
-3. **Fuzzy/variant matching** — abbreviations, common misspellings, spacing
-   variants. On the survivors only.
-4. **LLM relevance adjudication** — for ambiguous hits, a single cheap
-   classification call answering "is this about the entity in question, yes or
-   no?" This is the lane that rescues a common-word brand name: a coined term
-   never needs it, and a name made of two ordinary English words needs it on
-   nearly every hit.
+- **Not casefolded.** Every search is already case-insensitive; casefolding
+  would only mean the span shown to a reviewer comes back in lower case, which
+  reads as a bug.
+- **The matched span is stored.** A reviewer who cannot see *why* an item was
+  flagged stops trusting the feed, and a feed nobody trusts is a feed nobody
+  reads.
 
-**Store the matched span** (`matched_text`). When a reviewer sees why an item
-was flagged, false positives get reported and the negative patterns improve.
-Without it, users lose trust in the feed and stop reading it.
+An LLM relevance-adjudication tier is specified but not implemented; it needs a
+live corpus to be worth its cost. `Match.confidence` is the field it populates.
 
 ---
 
-## 9. Enrichment
+## 9. Classification
 
-### 9.1 Sentiment — the honest position
+### 9.1 Spam is the headline problem
 
-The published comparisons are less flattering than vendor material suggests.
-On Reddit-style text, lexicon methods and transformers land closer together
-than expected: one Reddit-focused study put VADER at 69% overall accuracy
-against 66% for a RoBERTa model — though the aggregate hides that VADER has
-markedly worse precision on positive and neutral classes and worse recall on
-negatives, which is the class a reputation-monitoring tool most needs to catch.
+Reddit's automated content is mostly AutoModerator boilerplate — uniform and
+trivially matched. YouTube comment spam is an industry: crypto bait,
+sub-for-sub, prize scams, engagement farming, phone numbers, off-platform
+contact details. It is both a larger share of the stream and far more varied.
 
-Reddit is genuinely hard for sentiment: heavy sarcasm, in-group irony,
-community-specific register, and negation-dense phrasing. Sarcasm-specific
-work on the Self-Annotated Reddit Corpus reports fine-tuned BERT-family models
-reaching ~0.92 F1, but that is a dedicated task-specific model, not a
-general-purpose sentiment classifier.
+So the detector is **scored, not boolean**: any single signal (a link, shouting,
+a phone number) is weak alone but decisive in company. It runs **before**
+anything expensive, because spending model budget classifying sub-for-sub is
+pure waste.
 
-**Recommended hybrid:**
+The false positive that matters most is a helpful person posting a link. The
+scoring threshold is set so that a single link does not condemn a comment.
+
+### 9.2 Sentiment — the honest position
+
+Unchanged from the Reddit build, because the finding is about the text, not the
+platform: on social-media text, lexicon methods and transformers land closer
+together than vendor material suggests — one study put VADER at 69% accuracy
+against RoBERTa's 66% — and the aggregate hides that the lexicon is markedly
+worse on the negative class, which is the class a reputation tool exists to
+catch. Sarcasm is a genuine, unsolved weakness.
+
+The response is to report confidence everywhere and route low-confidence items
+to a human rather than asserting them. A negative-sentiment alert on a
+sarcastic compliment erodes trust faster than a missed mention.
+
+Three lanes, cheapest first:
 
 | Lane | Handles | Cost |
 |---|---|---|
-| VADER (or similar lexicon) | First-pass triage on everything | ~free, microseconds |
-| Transformer (`twitter-roberta-base-sentiment` class) | Items that matched a term | ~ms on GPU, ~50ms CPU |
-| LLM | Ambiguous, high-severity, or sarcasm-suspect items | ~$0.001–0.01 per item |
+| Lexicon + rules | Everything | Free |
+| Transformer | Matched items | ~50ms CPU |
+| LLM | Ambiguous, severe, sarcasm-suspect | ~$0.001–0.01 each |
 
-Route to the LLM lane when the cheap lanes disagree, when the transformer's
-confidence is low, or when severity is high. That keeps LLM spend to roughly
-5–15% of matched volume while catching the cases that actually matter.
+Only the lexicon lane is implemented. The others are `Enricher` implementations
+with the same interface, and `route_to_expensive_lane()` already computes what
+*would* escalate — which is what makes the cost projection real.
 
-**Always emit a confidence score and always show it.** A negative-sentiment
-alert on a sarcastic compliment erodes trust faster than a missed mention.
+### 9.3 Severity
 
-### 9.2 Beyond sentiment
-
-Sentiment alone is a weak signal. The fields that make a listening tool
-actionable:
-
-- **Intent** — complaint · question · recommendation · comparison · news ·
-  purchase-intent. Drives *who* gets the alert.
-- **Severity (1–5)** — a rant with 3 upvotes in a dead subreddit is not a
-  400-comment front-page thread. Combine sentiment, subreddit reach, and
-  velocity.
-- **Topic/aspect** — *what* the complaint is about. Aspect-based sentiment
-  ("enrolment process: negative; faculty: positive") is far more useful than a
-  document-level score.
-- **Suggested action** — with a rationale. Even when nobody follows the
-  suggestion, the rationale is what makes a reviewer trust or correct the
-  classification.
-
-Structured output (a constrained JSON schema) from a single LLM call yields all
-four at once, which is cheaper than four separate models and easier to keep
-consistent.
+1–5, combining sentiment, reach and consequence. YouTube gives real like and
+reply counts — no vote fuzzing as on Reddit — so reach is a more trustworthy
+input here, and a liked complaint genuinely is more urgent than an ignored one.
+Consequence language ("lawyer", "CHED", "journalist") raises severity
+independent of sentiment score, because it describes outcomes rather than
+feelings.
 
 ---
 
 ## 10. Alerting
 
-Delivery is where most listening tools fail — not on capture, but by producing
-a feed nobody reads.
-
-- **Route by severity, not by volume.** Severity 4–5 pages a human; 2–3 lands
-  in a daily digest; 1 is queryable but silent.
-- **Deduplicate by thread, not by item.** Forty comments in one thread is one
-  alert with a comment count, not forty alerts.
-- **Spike detection** over a rolling baseline: alert when mentions of a term in
-  a window exceed `mean + 3σ` of the trailing 14-day same-hour baseline.
-  Absolute thresholds break the moment volume changes.
-- **Cool-down per term** so a genuinely viral thread cannot produce a hundred
-  notifications.
-- **Every alert carries the permalink and the matched span.** A reviewer must
-  be able to reach the source in one click and see why it fired.
-- **Alerts must respect tombstones.** An alert queued for an item deleted
-  before send should not go out.
+- **Route by severity, not volume.** 4–5 pages a human; 2–3 is a digest; 1 is
+  queryable and silent.
+- **One alert per video, not per comment.** A review-bombed video produces one
+  alert with a count, not eighty.
+- **Spike detection** against a rolling 14-day baseline at mean + 3σ. Leading
+  empty days are excluded, because they mean "capture had not started" rather
+  than "volume was zero" — including them makes a freshly deployed system alarm
+  on its own arrival.
+- **Alerts respect purges.** A queued alert for purged content does not go out,
+  and existing alert bodies are scrubbed.
 
 ---
 
 ## 11. Metrics
 
-Definitions worth fixing early, because changing them later invalidates
-history:
-
 | Metric | Definition |
 |---|---|
-| Mention volume | Count of items matching a term in a window, tombstones excluded from content but **included in counts** |
-| Share of voice | Term's mentions ÷ total mentions across the tracked competitor/peer set |
-| Net sentiment | `(positive − negative) / total`, reported with the classifier's version |
-| Reach (estimated) | Σ over threads of `f(subreddit subscribers, score, comments)` — an estimate, label it as one |
-| Velocity | Δmentions/hour vs the trailing 14-day same-hour baseline |
-| Response latency | First-seen → first human action, for items above a severity threshold |
+| Mention volume | Mentions in a window. **Purged items keep their count** |
+| Share of voice | A term's mentions ÷ all matched mentions |
+| Net sentiment | `(positive − negative) / classified`, reported with the model version |
+| Video views | A real number from YouTube — but **not** comment reach |
+| Spike | Daily volume above mean + 3σ of the trailing 14 days |
 
-Reach in particular should never be presented as a number without a
-qualifier — Reddit gives no impression data, and any reach figure is a model,
-not a measurement.
+Reach deserves the same caution as on Reddit. YouTube view counts are genuine,
+unlike Reddit's fuzzed scores, but a view is not a read of any particular
+comment. Label it as what it is.
 
 ---
 
 ## 12. Cost and capacity
 
-### 12.1 Free-tier budget (144,000 calls/day)
+A worked day for 3 tracked channels, ~7 active videos, 3 watch terms:
 
-A concrete allocation for 20 tracked subreddits, 30 watch terms, ~500k
-retained items:
-
-| Loop | Cadence | Calls/day | Share |
+| Job | Calls | Units | Share |
 |---|---|---|---|
-| Subreddit poll (`/new` + `/comments`) | 20 subs × 2 endpoints, 2-min interval | 28,800 | 20% |
-| Discovery search | 30 terms, every 20 min | 2,160 | 1.5% |
-| Revisit hydration | decay curve, batched ×100 | ~1,000 | 0.7% |
-| Compliance sweep | 500k items ÷ 100, daily | 5,000 | 3.5% |
-| Retries + headroom | — | ~5,000 | 3.5% |
-| **Total** | | **~42,000** | **~29%** |
+| Channel sweep | 3 × `playlistItems.list` | 3 | 0.03% |
+| Comment harvest | 7 videos × 3 pages | 21 | 0.2% |
+| Retention refresh | ~100 records ÷ 50 | 2 | 0.02% |
+| Discovery | 3 × `search.list` | 300 | 3% |
+| **Total** | | **~326** | **~3%** |
 
-**The free tier is not the binding constraint at this scale.** It supports
-roughly 3× this footprint before the limiter starts shedding work. The binding
-constraints are the *non-commercial* restriction and the approval process.
+**The free quota is not the binding constraint at this scale** — it supports
+roughly 30× this footprint. It becomes binding when discovery is run
+aggressively or when the retained corpus grows into six figures.
 
-### 12.2 What costs money
-
-| Item | Estimate |
+| Item | Cost |
 |---|---|
-| Reddit Data API (non-commercial) | $0 |
-| Reddit Data API (commercial) | ~$0.24/1k calls; bundled tier ~$12,000/mo for 50M calls |
-| LLM enrichment | At 2,000 matched items/day with 10% LLM-routed and ~800 tokens each: single-digit dollars/month |
-| Transformer inference | CPU-adequate at this volume; no GPU needed below ~50k items/day |
-| Storage | 500k items ≈ 1–2 GB with indexes. Trivial |
-| Compute | One small worker VM plus Redis |
-
-**The dominant cost of this system is not infrastructure — it is the licence
-question.** If the tool is used for anything commercial, the economics change
-by four orders of magnitude, and that is a business decision to make *before*
-writing code, not after.
+| YouTube Data API | $0 |
+| LLM enrichment | At 2,000 matched items/day, 10% escalated, ~800 tokens: single-digit dollars/month |
+| Transformer inference | CPU-adequate below ~50k items/day |
+| Storage | Capped by the 30-day rule, so it stays small by construction |
 
 ---
 
 ## 13. Compliance and privacy
 
-1. **Reddit Developer Terms / Responsible Builder Policy.** Access requires
-   approval. Commercial use requires written approval and a negotiated licence.
-   Non-commercial use of the free tier must genuinely be non-commercial —
-   internal reputation monitoring by an institution is a grey area worth a
-   written clarification from Reddit rather than an assumption.
-2. **Deletion propagation** (§7.4) is the obligation most likely to be breached
-   by accident, via exports and cached alerts rather than the primary store.
-3. **Local data-protection law.** Reddit usernames are pseudonymous but,
-   combined with post content, can constitute personal information. Under the
-   Philippine Data Privacy Act of 2012 (RA 10173), for instance, a deployment
-   needs a lawful basis (legitimate interest is the usual one for
-   public-content monitoring), a retention limit, and a documented purpose, and
-   the processing activity must be registered. Equivalent obligations exist in
-   most jurisdictions — establish yours before the corpus grows.
-4. **GDPR**, if any monitored subject may be in the EU: public availability is
-   not consent. Legitimate-interest assessment, retention limits, and an
-   erasure path (`purged_at` already provides the mechanism).
-5. **Never monitor individuals.** Watch terms should name organisations,
-   products, and services — not named people. A tool that can be pointed at a
-   person will eventually be pointed at one; constrain it in the
-   term-validation layer, where it is enforced, not in a policy document, where
-   it is not.
-6. **Retention limit.** Twelve to twenty-four months of full content, with
-   aggregates retained indefinitely, keeps the compliance sweep affordable and
-   the privacy posture defensible.
+1. **YouTube API Services Terms and Developer Policies.** The 30-day
+   refresh-or-delete rule (§7) is the operative one, plus the consistency
+   requirement. The derived-metrics carve-out is the only extension, and it
+   covers counts, not text.
+2. **Purging derivatives** is the obligation most likely to be breached by
+   accident — via exports and cached alert bodies rather than the primary
+   store.
+3. **Local data-protection law.** Comment author names and channel ids are
+   personal information. Under the Philippine Data Privacy Act (RA 10173), for
+   instance, a deployment needs a lawful basis, a retention limit and a
+   documented purpose, and the processing must be registered. Equivalent
+   obligations exist in most jurisdictions. The 30-day rule conveniently forces
+   a defensible retention posture.
+4. **Never monitor individuals.** Watch terms should name organisations,
+   products and services — not named people. A tool that can be pointed at a
+   person will eventually be pointed at one; constrain it in term validation,
+   where it is enforced, not in a policy document, where it is not.
+5. **Commenters are not public figures.** A YouTube comment is public but its
+   author usually did not expect to be catalogued. Keep the author hash for
+   analytics and let the name go.
 
 ---
 
-## 14. Reference implementation stack
+## 14. Implementation stack
 
-Nothing here is exotic. The recommendation is boring on purpose — the hard
-parts of this system are the rate-limit budget and the compliance sweep, and
-neither is made easier by an interesting stack.
+Boring on purpose. The hard parts are the quota ledger and the retention
+engine, and neither is made easier by an interesting stack.
 
-| Concern | Recommendation | Why |
+| Concern | Choice | Why |
 |---|---|---|
-| Language | Python 3.12+ | `asyncpraw`/`praw` exist and are maintained; the NLP ecosystem is here |
-| Reddit client | Raw `httpx` over `oauth.reddit.com` | PRAW hides the `X-Ratelimit-*` headers behind its own limiter, and those headers are the thing you most need to steer by. Use PRAW for exploration, your own client in production |
-| Scheduler / limiter | Redis | The token bucket must be shared across workers; an in-process limiter breaks the moment you run two |
-| Queue | Redis + RQ, or Celery | Only once enrichment volume justifies it. A single worker with an in-process scheduler carries the §12 volumes fine |
-| Store | PostgreSQL 16, or MySQL 8 | §6 DDL is MySQL; Postgres is the better fit if you want `tsvector` search and `JSONB` topic queries |
-| Search | The database's own full-text index first | Elasticsearch/OpenSearch only when corpus search becomes the bottleneck, which is later than you think |
-| API / UI | FastAPI + a server-rendered review feed | The reviewable feed (§15 phase 2) matters more than a dashboard, and needs no SPA |
-| Deploy | One worker process + one web process | A `Procfile`-shaped split; the poller cannot live in a request cycle |
+| Language | Python 3.9+ | Tested on 3.11; 3.9 supported (see `tests/test_python_compat.py`) |
+| API client | `httpx`, hand-rolled | The official client library hides the quota accounting this design is built around |
+| Store | SQLite (demo) / PostgreSQL or MySQL | The quota ledger and retention clock need real transactions once processes multiply |
+| Web | FastAPI + Jinja, server-rendered SVG charts | No build step, no CDN, no external scripts |
+| Scheduler | One long-lived worker process | The one non-negotiable: harvesting cannot live in a request cycle |
 
-**The one non-negotiable structural choice:** the poller runs as a long-lived
-process with its own scheduler, separate from anything serving HTTP. Everything
-else on this list can be swapped without touching the design.
+---
 
-### Configuration surface
+## 15. What is not built
 
-```ini
-REDDIT_CLIENT_ID=
-REDDIT_CLIENT_SECRET=
-REDDIT_USER_AGENT=server:<app-id>:<version> (by /u/<username>)
-REDIS_URL=
-DATABASE_URL=
-LLM_API_KEY=
-ALERT_WEBHOOK_URL=
-RETENTION_MONTHS=18
-COMPLIANCE_SWEEP_HOURS=24
-```
-
-## 15. Recommended phasing
-
-| Phase | Deliverable | Proves |
-|---|---|---|
-| 0 | OAuth client approved; rate limiter reading live headers | Access is actually obtainable — the riskiest unknown, so do it first |
-| 1 | Subreddit poll loop + normalise + dedupe + `listening_item` | Capture is lossless; measure real items/second |
-| 2 | Matching layer + a reviewable feed UI | Precision is acceptable *before* any money goes to models |
-| 3 | Compliance sweep | Legal position is sound before the corpus grows |
-| 4 | Enrichment (lexicon → transformer → LLM lanes) | Classification is worth its cost |
-| 5 | Alerting + severity routing | Someone actually reads it |
-| 6 | Archive backfill + trend analytics | Historical context |
-
-Phases 0 and 3 are ordered deliberately: access approval is the item most likely to
-fail outright, and compliance is far cheaper to build before there is a corpus
-to retrofit.
+- **Transformer and LLM lanes.** Interfaces exist; escalation is computed; only
+  the lexicon lane runs.
+- **A scheduler.** `harvest`, `discover` and `retention` are one-shot commands.
+  Retention on a timer is the one that carries policy exposure.
+- **Alert delivery.** Alerts are raised and displayed, not emailed or texted.
+- **A terms/channels CLI.** Configuration is seeded from the demo module.
+- **OAuth for owned-channel private data** (unpublished comments, held for
+  review).
 
 ---
 
 ## 16. Open questions
 
-1. **Is the intended use commercial?** This determines whether the project is a
-   $0/month build or a $12,000/month one. Nothing else in this document matters
-   as much.
-2. **What is the actual watch list?** Term ambiguity drives the entire matching
-   design. A distinctive coined name is a trivial matching problem; a name made
-   of two common words is a hard one, and determines how much of §8 you need.
-3. **How much history is required?** Live-only removes the archive dependency
-   and its 4–6 week lag entirely.
-4. **What latency does the use case need?** Sub-minute alerting costs
-   substantially more API budget than a 15-minute cadence and is rarely
-   necessary for reputation monitoring.
-5. **Who acts on an alert, and within what SLA?** A listening tool with no
+1. **Which channels matter?** Channel-first configuration is ~100× cheaper than
+   search, so the tracked list is the single highest-leverage decision.
+2. **Is 30 days of retained content enough?** If longer trend history is needed,
+   the answer is more `MetricSnapshot` rows, not longer text retention.
+3. **Does the 10,000-unit ceiling bind?** If discovery needs to be aggressive,
+   file the quota-increase audit form early.
+4. **Who acts on an alert, within what SLA?** A listening tool with no
    downstream response process produces a dashboard nobody opens.
 
 ---
 
 ## Sources
 
-Reddit primary documentation:
-- [Reddit API access rules (User-Agent, rate limits, batching)](https://github.com/reddit-archive/reddit/wiki/API)
-- [Reddit OAuth2 flows](https://github.com/reddit-archive/reddit/wiki/OAuth2)
-- [Public Content Policy](https://support.reddithelp.com/hc/en-us/articles/26410290525844-Public-Content-Policy)
-- [Do Reddit's data licensees have to stop using deleted data?](https://support.reddithelp.com/hc/en-us/articles/26417433892756-Do-Reddit-s-data-licensees-have-to-stop-using-data-deleted-from-Reddit)
-- [Responsible Builder Policy](https://support.reddithelp.com/hc/en-us/articles/42728983564564-Responsible-Builder-Policy)
-- [Comment tree / morechildren reference notes](https://github.com/Pyprohly/reddit-api-doc-notes/blob/main/docs/api-reference/comment_tree.rst)
+YouTube primary documentation (referenced; developers.google.com was not
+directly reachable from the build environment, so quota figures were
+cross-checked against multiple secondary sources):
+- [YouTube API Services — Developer Policies](https://developers.google.com/youtube/terms/developer-policies)
+- [Additional policies for derived metrics and data storage](https://developers.google.com/youtube/terms/derived-metrics-policy)
+- [Determine quota cost](https://developers.google.com/youtube/v3/determine_quota_cost)
+- [CommentThreads: list](https://developers.google.com/youtube/v3/docs/commentThreads/list)
 
-API limits and pricing (secondary; figures are widely reported rather than
-officially published — verify against a quote before budgeting):
-- [Reddit Data API Terms & Commercial Use (2026)](https://prowlo.com/blog/reddit-data-api)
-- [Reddit API Pricing (2026): $0.24/1K calls, free tier & limits](https://prowlo.com/blog/reddit-api-pricing)
-- [Reddit API in 2026: Pricing, Rate Limits & What Works](https://www.socialcrawl.dev/blog/reddit-data-api-2026)
-- [Reddit API Rate Limits in 2026](https://www.painpointmap.com/blog/reddit-api-rate-limits-guide)
-- [Reddit API Limitations: Complete Guide for Developers (2026)](https://painonsocial.com/blog/reddit-api-limitations)
-- [Reddit API Limits](https://data365.co/blog/reddit-api-limits)
+Quota costs and limits (secondary):
+- [YouTube API quota limits, costs and how to get more](https://www.getphyllo.com/post/youtube-api-limits-how-to-calculate-api-usage-cost-and-fix-exceeded-api-quota)
+- [100 searches burn 10,000 units](https://www.socialcrawl.dev/blog/youtube-data-api-2026)
+- [YouTube API quota explained](https://outlierkit.com/resources/youtube-api-quota/)
+- [YouTube API pricing: is it free?](https://outlierkit.com/resources/youtube-api-pricing/)
+- [commentThreads.list guide](https://www.commentshark.com/blog/youtube-data-api-commentthreads-list-guide)
 
-Historical archives:
-- [Best Pushshift Alternatives 2026: PullPush, Arctic Shift](https://www.redditapis.com/blogs/best-pushshift-alternatives-2026)
-- [How to Get Historical Reddit Data After Pushshift (2026)](https://www.xpoz.ai/blog/tutorials/how-to-get-historical-reddit-data-after-pushshift/)
-- [Pushshift Alternative 2026 (PullPush, Arctic Shift)](https://think-pol.com/pushshift-alternative)
+Platform comparison (why not Facebook):
+- [Meta Content Library](https://transparency.meta.com/researchtools/meta-content-library/)
+- [Facebook data APIs and access limits](https://www.socialfetch.dev/blog/best-facebook-data-apis-2026)
 
-Market and tooling:
-- [Best Reddit Monitoring Tools in 2026 (11 Compared)](https://snitchfeed.com/blog/best-reddit-monitoring-tools-2026)
-- [Best Reddit Research Tools After GummySearch Shut Down (2026)](https://www.subredditsignals.com/blog/reddit-research-tools-2026-gummysearch-alternatives)
-- [9 Best GummySearch Alternatives](https://prowlo.com/blog/gummysearch-shut-down-what-now)
-
-Sentiment and classification:
+Sentiment and sarcasm:
 - [VADER vs RoBERTa comparison](https://medium.com/@nityasav/enhancing-review-efficiency-through-sentiment-analysis-a-comparison-of-vader-and-roberta-c6920c9946f8)
-- [Sentiment Analysis of Cybersecurity Content on Twitter and Reddit (arXiv 2204.12267)](https://arxiv.org/pdf/2204.12267)
-- [Sarcasm Detection: A Comparative Study (arXiv 2107.02276)](https://arxiv.org/pdf/2107.02276)
-- [Enhancing sarcasm detection on social media: LLMs and BERT on SARC](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12617957/)
-- [Sentiment analysis: why your model misses sarcasm](https://labelyourdata.com/articles/natural-language-processing/sentiment-analysis)
-
-Pipeline architecture:
-- [Build a Social-Listening Agent for Brand Monitoring](https://www.digitalapplied.com/blog/build-social-listening-agent-brand-monitoring-2026)
-- [Social Media Monitoring API: Build Your Own in 5 Steps](https://www.socialcrawl.dev/blog/social-media-monitoring-api)
+- [Sarcasm detection: a comparative study (arXiv 2107.02276)](https://arxiv.org/pdf/2107.02276)
+- [LLMs and BERT on SARC](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12617957/)
